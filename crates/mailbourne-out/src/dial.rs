@@ -79,9 +79,15 @@ pub async fn secure(
     server_name: &str,
     roots: RootCertStore,
 ) -> std::io::Result<TlsStream<TcpStream>> {
-    let config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    // Explicit provider: never depend on ambient crate features to decide
+    // which cryptography a mail server runs.
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| std::io::Error::other(e.to_string()))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
 
     let name = ServerName::try_from(server_name.to_string())
