@@ -1,0 +1,30 @@
+[package]
+name = "mailbourne"
+description = "A Rust-native mail server and library — single binary, built-in doctor for DNS, DKIM, and deliverability."
+keywords = ["mail", "smtp", "email", "server", "self-hosted"]
+categories = ["email", "network-programming"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mailbourne"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "tokio/rt-multi-thread", "tokio/macros"]
+
+[dependencies]
+mailbourne-core = { path = "../mailbourne-core" }
+mailbourne-out = { path = "../mailbourne-out" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"], optional = true }
+tokio = { version = "1", features = ["rt"] }
