@@ -51,13 +51,17 @@ pub fn dkim_sign(
     use mail_auth::common::crypto::{RsaKey, Sha256};
     use mail_auth::common::headers::HeaderWriter;
     use mail_auth::dkim::DkimSigner;
+    use rustls_pki_types::PrivateKeyDer;
     use rustls_pki_types::pem::PemObject;
-    use rustls_pki_types::{PrivateKeyDer, PrivatePkcs1KeyDer};
 
-    let key_der = PrivatePkcs1KeyDer::from_pem_slice(rsa_private_key_pem.as_bytes())
+    // Accept any PEM container — PKCS#1 ("BEGIN RSA PRIVATE KEY", what
+    // LibreSSL writes) and PKCS#8 ("BEGIN PRIVATE KEY", what OpenSSL 3
+    // writes). Same key inside; users should never have to know the
+    // difference.
+    let key_der = PrivateKeyDer::from_pem_slice(rsa_private_key_pem.as_bytes())
         .map_err(|e| SignError::BadKey(e.to_string()))?;
-    let key = RsaKey::<Sha256>::from_key_der(PrivateKeyDer::Pkcs1(key_der))
-        .map_err(|e| SignError::BadKey(e.to_string()))?;
+    let key =
+        RsaKey::<Sha256>::from_key_der(key_der).map_err(|e| SignError::BadKey(e.to_string()))?;
 
     let signature = DkimSigner::from_key(key)
         .domain(domain)
@@ -148,6 +152,56 @@ wax and string\r\n";
             sealed.raw().ends_with(LETTER),
             "signing must add, never rewrite"
         );
+    }
+
+    /// The SAME throwaway key as [`TEST_KEY`], but in PKCS#8 form
+    /// (`BEGIN PRIVATE KEY`) — what OpenSSL 3 writes by default. Both
+    /// containers must work; "regenerate your key in the other format"
+    /// is not an answer a mail engine gets to give.
+    const TEST_KEY_PKCS8: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCyVhbn7rZ5N65h
+ptU0k0Op2t6u6c2qmMpILxrhWwzKmy9AcWWncyLvmZRUXDfjWgo/ZGqF43EjbuYT
+gQOOuukvQ/lhoG6DEqJlxbTcsaOqqtRBmFWZE6QQ07HYh9LZa71D/zwjGDz0dZZZ
+6dxOQJDkM3C/OLola8xgSqX9qaJ4+hqt3Pw972Ick7oeHGo4aMToi4w67iFtuGSA
+HVh5EWzM5kc+JapoymuZapOgygJctfDFp5fiEJCBG7tESpIV49wAzl35FyneAZHN
+0AsEGvk1cwvZ7q3m/7aWGxHzjuBELCjXvzEMSqjKibf3mhZBx9mbPsqYaza02RwK
+vEOGIdDxAgMBAAECggEAMLQGKW0t9EjanNydGXCmZ/rYGdjMTCzSAYirxKPDCIn9
+C5JseqCdB+ZfdfKBaNusNMfNt6b3vP+KYgU33YD6MehUcO8Jf05Vf4nQ7Pyuf+uL
+cCaUKewNQHMv/LyLPsmHtMw9ti/mZbS/TOrrOYu0hj3uKqrpW1LnS9zXHEF5l6Px
+cvR3FGc6h1ZZ41jL6vawY1R9IiVo0/Gr2NTveEkcFyASJ5BZ0DRKLu1yYPXPlqRL
+q38s5l8u1mRObn/cdDYM2jRAC4pox0Vne2KMTjCIjNor3Zz2dIWXI199NWdi6Slt
+UAD8YBi8yPVUUKh8r2Cot7DVXU8xxcRR24jQ7NYaaQKBgQDX11TSpN1i1ppKnFQl
+kQYK5d3Jr2sCTVJHx9OTH6HiyQgteruncHMnHe+gZZiYblrcgRBycVzfFXXWoXPJ
+x5AEgwFPoqzwIf7yab7ZT7n1M8sQCQO/btm9o/cxT/ioWtA+SXjxWJEBDanYp6AJ
+YiAXxYtaIeqmi8AejgVLxPqYXwKBgQDThGAG6hRjBCqts7Dg5//JK/IJgjxka73L
+U7mW7pxNkOyV+mrSTWpQXYGCzToLjTWoR/uFXU41VNUNtBz4IpS0ybxRTviCius2
+MX2IFfj2iqSDEihKpaHQp3CBkRHhSHiSveZpVnOzGVRIYmqgXva9DW7TYd5vMSnQ
+8uhHZm1YrwKBgQCQAUXBiGeAgyfL8cMekUSTzsuLvXLKxWXJKGRbu3YZxgCjv0gm
+LZtWlN2EiWQnBzGt/ppHkKTi3gGR4oRLMs8+g11DkYiKalQbzjub51ptY1Hu7+TF
+OyMhKJ1LFE0VnglkFUcQ1wNfzYrtVuEqgYJh+dXAm/JfjcvvVtfntpNvRwKBgCgr
+NYlanvCG9Av02hx8MqljvR1tLEbt5ydcCRzOx8Q7R5Lb8blqlkwY1eWfT+ytroj8
+0plrNNUP/T4S/IVrG86RmT/fvXYdJ7os/+f+ND+t6LwzkI9MkURs6ALTKBAekTdc
+9QsALgzPPKBagGFgZ39Ts75VEccQER7rYo1cuFtlAoGAZkZuMTObx0fHDaixB/fu
+Q+nnrLazMGr6ImZkaksG0jaTnaZIUML0f8ZBYPGmoOqijFWhD6/QwXM7KeJKZKqd
+gVQtxjn6ualSCW2ZFo3LErjlP/Mx4OSY9uuu9ARGnmyQSaAeWp0XkPHAa0GMyZx6
+A5SMBYtkBY6JTg0OXX82Aso=
+-----END PRIVATE KEY-----"#;
+
+    #[test]
+    fn a_pkcs8_key_signs_identically_to_its_pkcs1_twin() {
+        // OpenSSL 3 writes PKCS#8 ("BEGIN PRIVATE KEY"); LibreSSL writes
+        // PKCS#1 ("BEGIN RSA PRIVATE KEY"). Same key inside — both must
+        // produce a valid signature.
+        let sealed = dkim_sign(
+            &Message::from_raw(LETTER.to_vec()),
+            "us.example",
+            "mb2026",
+            TEST_KEY_PKCS8,
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(sealed.raw());
+        assert!(text.starts_with("DKIM-Signature:"), "got: {text}");
+        assert!(text.contains("s=mb2026"));
     }
 
     #[test]
