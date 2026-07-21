@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+node_modules/
+*.pyc
+__pycache__/
+.DS_Store
+dist/npm/*.tgz
+dist/pypi/dist/
+
+# Never commit key material or local operational config — real identities
+# live on servers, not in git. (The only PEM allowed in-repo is the labeled
+# throwaway inside sign.rs's tests.)
+*.pem
+*.key
+*.env
+.env*
+mailbourne.toml

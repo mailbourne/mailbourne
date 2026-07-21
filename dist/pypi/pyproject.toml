@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mailbourne"
+version = "0.0.1"
+description = "A Rust-native mail server and library — single binary, built-in doctor for DNS, DKIM, and deliverability. Name reservation; the engine is still brewing."
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["mail", "smtp", "email", "server", "self-hosted", "dkim", "spf", "dmarc"]
+
+[project.urls]
+Homepage = "https://github.com/mailbourne/mailbourne"
+Repository = "https://github.com/mailbourne/mailbourne"

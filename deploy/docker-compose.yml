@@ -1,0 +1,20 @@
+# mailbourne — the storefront snippet.
+# One required env var; the logs talk you through the rest:
+#   docker compose up -d && docker compose logs -f mail
+#
+# NOTE: the image is not published yet — this file documents the intended
+# deployment shape.
+
+services:
+  mail:
+    image: ghcr.io/mailbourne/mailbourne
+    container_name: mail
+    restart: unless-stopped
+    ports:
+      - "25:25"    # server-to-server SMTP (the world delivers to you here)
+      - "465:465"  # user submission, implicit TLS
+      - "587:587"  # user submission, STARTTLS
+    volumes:
+      - ./mailbourne:/var/mailbourne   # identity lives here (config + DKIM keys)
+    environment:
+      MAILBOURNE_DOMAIN: example.com   # the only required setting
