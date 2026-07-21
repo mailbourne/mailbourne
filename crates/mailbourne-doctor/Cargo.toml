@@ -1,0 +1,12 @@
+[package]
+name = "mailbourne-doctor"
+description = "The judge: turns probe evidence into a checklist report; returns data, renders nothing (internal)"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
