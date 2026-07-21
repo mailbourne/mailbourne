@@ -19,7 +19,8 @@ use mailbourne_core::Message;
 /// anything reaches the wire unsigned.
 #[derive(Debug, thiserror::Error)]
 pub enum SignError {
-    /// The private key could not be read (not PEM, not RSA PKCS#1).
+    /// The private key could not be read (not a PEM-encoded RSA key in
+    /// either PKCS#1 or PKCS#8 form).
     #[error("could not read the DKIM private key: {0}")]
     BadKey(String),
     /// The signer rejected the message or configuration.
@@ -32,9 +33,10 @@ pub enum SignError {
 ///
 /// - `domain` + `selector` tell verifiers where in DNS the public key
 ///   lives: `<selector>._domainkey.<domain>`.
-/// - `rsa_private_key_pem` is the PKCS#1 PEM generated at first boot
-///   (`-----BEGIN RSA PRIVATE KEY-----`). It never leaves the machine;
-///   only its public half is published.
+/// - `rsa_private_key_pem` is the RSA private key as PEM, in either
+///   container: PKCS#1 (`BEGIN RSA PRIVATE KEY`, LibreSSL's default) or
+///   PKCS#8 (`BEGIN PRIVATE KEY`, OpenSSL 3's default). It never leaves
+///   the machine; only its public half is published.
 ///
 /// The original bytes are preserved untouched after the new header —
 /// signing *adds*, never rewrites.
