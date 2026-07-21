@@ -1,7 +1,6 @@
 [package]
 name = "mailbourne-doctor"
-description = "The judge: turns probe evidence into a checklist report; returns data, renders nothing (internal)"
-publish = false
+description = "The judge: turns probe evidence into a checklist report; returns data, renders nothing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

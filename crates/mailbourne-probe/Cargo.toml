@@ -1,7 +1,6 @@
 [package]
 name = "mailbourne-probe"
-description = "Questions mailbourne asks the world: DNS, ports, TLS, blocklists (internal)"
-publish = false
+description = "Questions mailbourne asks the world: DNS, ports, TLS, blocklists"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

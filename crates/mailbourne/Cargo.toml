@@ -23,8 +23,8 @@ default = ["cli"]
 cli = ["dep:clap", "tokio/rt-multi-thread", "tokio/macros"]
 
 [dependencies]
-mailbourne-core = { path = "../mailbourne-core" }
-mailbourne-out = { path = "../mailbourne-out" }
+mailbourne-core = { path = "../mailbourne-core", version = "0.0.1" }
+mailbourne-out = { path = "../mailbourne-out", version = "0.0.1" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"], optional = true }
 tokio = { version = "1", features = ["rt"] }

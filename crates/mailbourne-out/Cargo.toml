@@ -1,7 +1,6 @@
 [package]
 name = "mailbourne-out"
-description = "A message must leave: signing, routing, dialing, SMTP conversation, queue, retry (internal)"
-publish = false
+description = "A message must leave: signing, routing, dialing, SMTP conversation, queue, retry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +11,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-mailbourne-core = { path = "../mailbourne-core" }
+mailbourne-core = { path = "../mailbourne-core", version = "0.0.1" }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "net", "time", "rt", "macros"] }
 hickory-resolver = "0.24"
