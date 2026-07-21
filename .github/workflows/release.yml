@@ -39,14 +39,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux builds are STATIC MUSL: one binary, zero runtime
+          # dependencies, runs on any distro regardless of glibc age.
           - name: linux-amd64
             runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             asset: mailbourne-linux-amd64.tar.gz
             binary: mailbourne
           - name: linux-arm64
             runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             asset: mailbourne-linux-arm64.tar.gz
             binary: mailbourne
           - name: darwin-arm64
@@ -65,23 +67,30 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        shell: bash
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
 
       - name: Build release binary
         shell: bash
-        run: cargo build --release --bin mailbourne
+        run: cargo build --release --bin mailbourne --target ${{ matrix.target }}
 
       - name: Archive (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          cd target/release
-          tar -czf "../../${{ matrix.asset }}" "${{ matrix.binary }}"
+          cd "target/${{ matrix.target }}/release"
+          tar -czf "../../../${{ matrix.asset }}" "${{ matrix.binary }}"
 
       - name: Archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/release/${{ matrix.binary }}" -DestinationPath "${{ matrix.asset }}"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" -DestinationPath "${{ matrix.asset }}"
 
       - name: Generate checksum
         shell: bash
