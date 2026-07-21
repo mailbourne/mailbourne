@@ -1,0 +1,27 @@
+[package]
+name = "mailbourne-out"
+description = "A message must leave: signing, routing, dialing, SMTP conversation, queue, retry (internal)"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mailbourne-core = { path = "../mailbourne-core" }
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "net", "time", "rt", "macros"] }
+hickory-resolver = "0.24"
+tokio-rustls = "0.26"
+rustls = "0.23"
+webpki-roots = "0.26"
+mail-auth = "0.11"
+rustls-pki-types = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "net", "time", "rt-multi-thread", "macros"] }
+rcgen = "0.13"
