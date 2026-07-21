@@ -54,6 +54,31 @@ enum Command {
         #[arg(long)]
         host: Option<String>,
     },
+    /// DNS toolbox: mint keys and print the records to publish.
+    Dns {
+        #[command(subcommand)]
+        command: DnsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DnsCommand {
+    /// Mint a fresh 2048-bit DKIM keypair and print the record to publish.
+    Keygen {
+        /// Selector — the name before `._domainkey` in DNS.
+        #[arg(long, default_value = "mb2026")]
+        selector: String,
+        /// Your mail domain (used only to print the exact DNS names).
+        #[arg(long)]
+        domain: Option<String>,
+        /// Where to write the private key.
+        #[arg(long, default_value = "dkim.pem")]
+        out: std::path::PathBuf,
+        /// Overwrite an existing key file. Dangerous: a replaced key
+        /// invalidates the record currently in DNS.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -162,5 +187,78 @@ async fn run(cli: Cli) -> i32 {
                 }
             }
         }
+        Command::Dns { command } => match command {
+            DnsCommand::Keygen {
+                selector,
+                domain,
+                out,
+                force,
+            } => keygen(&selector, domain.as_deref(), &out, force),
+        },
     }
+}
+
+/// Mint a DKIM keypair: write the secret half, print the public half.
+fn keygen(selector: &str, domain: Option<&str>, out: &std::path::Path, force: bool) -> i32 {
+    if out.exists() && !force {
+        eprintln!(
+            "✗ {} already exists — refusing to overwrite.",
+            out.display()
+        );
+        eprintln!("  A replaced key silently invalidates the record already in");
+        eprintln!("  DNS (mail keeps signing, verification starts failing).");
+        eprintln!("  If you really mean to rotate: --force, then re-publish the");
+        eprintln!("  printed record before the next send.");
+        return 2;
+    }
+
+    let pair = match mailbourne::out::sign::generate_dkim_keypair() {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("✗ could not mint a keypair: {e}");
+            return 1;
+        }
+    };
+
+    if let Err(e) = std::fs::write(out, &pair.private_key_pem) {
+        eprintln!("✗ could not write {}: {e}", out.display());
+        return 1;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o600));
+    }
+
+    println!(
+        "✓ private key written to {}  (mode 600 — it never leaves this machine)",
+        out.display()
+    );
+    println!();
+    println!("Publish this TXT record at your DNS provider:");
+    println!();
+    match domain {
+        Some(domain) => {
+            println!("  Name:    {selector}._domainkey.{domain}");
+            println!("  Type:    TXT");
+            println!("  Content: {}", pair.dns_record_value);
+            println!();
+            println!("  (Cloudflare tip: if your zone is a parent of {domain},");
+            println!("   the Name field wants everything left of the zone apex.)");
+        }
+        None => {
+            println!("  Name:    {selector}._domainkey.<your-domain>");
+            println!("  Type:    TXT");
+            println!("  Content: {}", pair.dns_record_value);
+        }
+    }
+    println!();
+    println!("What just happened: DKIM is a wax seal. The secret key stamps every");
+    println!("outgoing message; the record above is the public half the world uses");
+    println!("to check the stamp. Then:  mailbourne send --dkim-selector {selector} \\");
+    println!(
+        "  --dkim-key {} --to you@example.com --from proof@<your-domain>",
+        out.display()
+    );
+    0
 }

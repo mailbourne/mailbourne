@@ -77,6 +77,54 @@ pub fn dkim_sign(
     Ok(Message::from_raw(sealed))
 }
 
+/// A freshly minted DKIM identity: keep the private half, publish the
+/// public half.
+#[derive(Debug)]
+pub struct DkimKeypair {
+    /// The private key, PKCS#8 PEM. Write it to disk with tight
+    /// permissions; it must never leave the machine.
+    pub private_key_pem: String,
+    /// The ready-to-paste DNS TXT record value:
+    /// `v=DKIM1; k=rsa; p=<base64 public key>`.
+    pub dns_record_value: String,
+}
+
+/// Mints a fresh 2048-bit RSA DKIM keypair.
+///
+/// 2048 bits is the DKIM production standard (and the floor our signing
+/// backend enforces). The returned [`DkimKeypair`] carries both halves of
+/// the deal: the secret you keep and the record you publish at
+/// `<selector>._domainkey.<domain>`.
+///
+/// # Errors
+/// [`SignError::Signing`] if key generation itself fails (exotic —
+/// effectively only under RNG failure).
+pub fn generate_dkim_keypair() -> Result<DkimKeypair, SignError> {
+    use base64::Engine;
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+
+    let mut rng = rand::thread_rng();
+    let private =
+        rsa::RsaPrivateKey::new(&mut rng, 2048).map_err(|e| SignError::Signing(e.to_string()))?;
+
+    let private_key_pem = private
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|e| SignError::Signing(e.to_string()))?
+        .to_string();
+
+    // The DNS `p=` value is the base64 of the SPKI DER — the same bytes
+    // `openssl rsa -pubout -outform DER` would emit.
+    let spki = rsa::RsaPublicKey::from(&private)
+        .to_public_key_der()
+        .map_err(|e| SignError::Signing(e.to_string()))?;
+    let p = base64::engine::general_purpose::STANDARD.encode(spki.as_bytes());
+
+    Ok(DkimKeypair {
+        private_key_pem,
+        dns_record_value: format!("v=DKIM1; k=rsa; p={p}"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +264,46 @@ A5SMBYtkBY6JTg0OXX82Aso=
         )
         .unwrap_err();
         assert!(matches!(err, SignError::BadKey(_)));
+    }
+}
+
+#[cfg(test)]
+mod keygen_tests {
+    use super::*;
+
+    #[test]
+    fn a_minted_key_signs_a_message_successfully() {
+        // The strongest possible proof the PEM is well-formed: the signing
+        // path accepts it end to end.
+        let pair = generate_dkim_keypair().unwrap();
+        let sealed = dkim_sign(
+            &Message::from_raw(b"From: a@b.c\r\n\r\nhi\r\n".to_vec()),
+            "b.c",
+            "fresh",
+            &pair.private_key_pem,
+        )
+        .unwrap();
+        assert!(sealed.raw().starts_with(b"DKIM-Signature:"));
+    }
+
+    #[test]
+    fn the_dns_record_value_is_ready_to_paste() {
+        let pair = generate_dkim_keypair().unwrap();
+        assert!(pair.dns_record_value.starts_with("v=DKIM1; k=rsa; p="));
+        // A 2048-bit SPKI in base64 is ~392 chars; anything short means
+        // we encoded the wrong thing.
+        let p = pair.dns_record_value.rsplit("p=").next().unwrap();
+        assert!(
+            p.len() > 300,
+            "public key looks truncated: {} chars",
+            p.len()
+        );
+    }
+
+    #[test]
+    fn every_minting_is_unique() {
+        let a = generate_dkim_keypair().unwrap();
+        let b = generate_dkim_keypair().unwrap();
+        assert_ne!(a.private_key_pem, b.private_key_pem);
     }
 }

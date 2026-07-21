@@ -11,7 +11,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-mailbourne-core = { path = "../mailbourne-core", version = "0.0.3" }
+mailbourne-core = { path = "../mailbourne-core", version = "0.0.4" }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "net", "time", "rt", "macros"] }
 hickory-resolver = "0.24"
@@ -23,6 +23,11 @@ rustls = { version = "0.23", default-features = false, features = ["logging", "s
 webpki-roots = "0.26"
 mail-auth = { version = "0.11", default-features = false, features = ["ring", "report", "dns-hickory"] }
 rustls-pki-types = "1"
+# Key *generation* (not signing) rides RustCrypto's rsa — pure Rust, the
+# same stack mail-auth's own `generate` feature uses.
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "net", "time", "rt-multi-thread", "macros"] }
