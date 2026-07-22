@@ -83,6 +83,14 @@ pub enum ConfigError {
     /// refuse loudly rather than resolve silently.
     #[error("domain {0} is declared more than once")]
     DuplicateDomain(String),
+    /// The file itself could not be read.
+    #[error("could not read {path}: {source}")]
+    Unreadable {
+        /// The path we tried.
+        path: std::path::PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
 }
 
 impl Config {
@@ -100,6 +108,36 @@ impl Config {
         for domain in &config.domains {
             if !seen.insert(domain.name.as_str()) {
                 return Err(ConfigError::DuplicateDomain(domain.name.clone()));
+            }
+        }
+        Ok(config)
+    }
+
+    /// Loads `mailbourne.toml` from disk.
+    ///
+    /// Relative `dkim_key` paths are resolved against the config file's own
+    /// directory — so a config can travel with its keys ("keys/x.pem" next
+    /// to the TOML) and mean the same thing from any working directory.
+    ///
+    /// # Errors
+    /// [`ConfigError::Unreadable`] when the file can't be read, plus
+    /// everything [`Config::parse_toml`] refuses.
+    pub fn load(path: &std::path::Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut config = Self::parse_toml(&text)?;
+
+        // Anchor relative key paths to the config's home, not the caller's
+        // working directory — the config travels with its keys.
+        if let Some(home) = path.parent() {
+            for domain in &mut config.domains {
+                if let Some(key) = &domain.dkim_key {
+                    if key.is_relative() {
+                        domain.dkim_key = Some(home.join(key));
+                    }
+                }
             }
         }
         Ok(config)
@@ -190,6 +228,62 @@ mod tests {
         let domain = config.domain_for_sender(&sender).unwrap();
         assert_eq!(domain.name, "ds.example.com");
         assert_eq!(domain.dkim_selector.as_deref(), Some("mb2026"));
+    }
+
+    #[test]
+    fn load_reads_a_file_and_anchors_relative_key_paths() {
+        let dir = std::env::temp_dir().join("mb-config-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mailbourne.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [server]
+            hostname = "mail.example.com"
+            [[domain]]
+            name = "example.com"
+            dkim_selector = "s1"
+            dkim_key = "keys/example.pem"
+            "#,
+        )
+        .unwrap();
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.domain("example.com").unwrap().dkim_key.as_deref(),
+            Some(dir.join("keys/example.pem").as_path()),
+            "relative key paths anchor to the config's directory"
+        );
+    }
+
+    #[test]
+    fn load_leaves_absolute_key_paths_alone() {
+        let dir = std::env::temp_dir().join("mb-config-test-abs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mailbourne.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [server]
+            hostname = "mail.example.com"
+            [[domain]]
+            name = "example.com"
+            dkim_key = "/etc/keys/example.pem"
+            "#,
+        )
+        .unwrap();
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.domain("example.com").unwrap().dkim_key.as_deref(),
+            Some(std::path::Path::new("/etc/keys/example.pem"))
+        );
+    }
+
+    #[test]
+    fn load_reports_a_missing_file_honestly() {
+        let err = Config::load(std::path::Path::new("/nowhere/mailbourne.toml")).unwrap_err();
+        assert!(matches!(err, ConfigError::Unreadable { .. }));
     }
 
     #[test]

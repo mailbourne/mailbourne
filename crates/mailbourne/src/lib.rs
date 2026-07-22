@@ -15,7 +15,9 @@
 //! inspector arrive next.
 
 pub mod compose;
+pub mod identity;
 
+pub use mailbourne_core::config;
 pub use mailbourne_core::{EmailAddress, Envelope, MailEvent, Message};
 pub use mailbourne_out as out;
 

@@ -53,6 +53,10 @@ enum Command {
         /// Skip MX routing and dial this host directly (host or host:port).
         #[arg(long)]
         host: Option<String>,
+        /// Path to mailbourne.toml (default: $MAILBOURNE_CONFIG, then
+        /// ./mailbourne.toml, then /var/mailbourne/mailbourne.toml).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
     },
     /// DNS toolbox: mint keys and print the records to publish.
     Dns {
@@ -100,30 +104,50 @@ async fn run(cli: Cli) -> i32 {
             dkim_selector,
             dkim_key,
             host,
+            config,
         } => {
             let (Ok(from), Ok(to)) = (EmailAddress::parse(&from), EmailAddress::parse(&to)) else {
                 eprintln!("✗ addresses must look like someone@somewhere.tld");
                 return 2;
             };
-            let hostname = hostname.unwrap_or_else(|| format!("mail.{}", from.domain()));
+
+            let config = match load_config(config.as_deref()) {
+                Ok(config) => config,
+                Err(code) => return code,
+            };
+            let overrides = mailbourne::identity::Overrides {
+                hostname,
+                dkim_domain,
+                dkim_selector,
+                dkim_key,
+            };
+            let id = mailbourne::identity::resolve(config.as_ref(), &from, &overrides);
+            for note in &id.notes {
+                println!("  · {note}");
+            }
+            let hostname = id.hostname;
 
             println!("  building message (RFC 5322)…… ✓");
             let mut message =
                 mailbourne::compose::plain_text(&from, &to, &subject, &body, &hostname);
 
-            match (&dkim_selector, &dkim_key) {
-                (Some(selector), Some(key_path)) => {
-                    let domain = dkim_domain.unwrap_or_else(|| from.domain().to_string());
-                    let pem = match std::fs::read_to_string(key_path) {
+            match &id.dkim {
+                Some(dkim) => {
+                    let pem = match std::fs::read_to_string(&dkim.key_path) {
                         Ok(pem) => pem,
                         Err(e) => {
-                            eprintln!("✗ could not read {}: {e}", key_path.display());
+                            eprintln!("✗ could not read {}: {e}", dkim.key_path.display());
                             return 2;
                         }
                     };
-                    match mailbourne::out::sign::dkim_sign(&message, &domain, selector, &pem) {
+                    match mailbourne::out::sign::dkim_sign(
+                        &message,
+                        &dkim.domain,
+                        &dkim.selector,
+                        &pem,
+                    ) {
                         Ok(signed) => {
-                            println!("  DKIM signing ({selector})……… ✓  d={domain}");
+                            println!("  DKIM signing ({})……… ✓  d={}", dkim.selector, dkim.domain);
                             message = signed;
                         }
                         Err(e) => {
@@ -132,7 +156,7 @@ async fn run(cli: Cli) -> i32 {
                         }
                     }
                 }
-                _ => println!("  DKIM signing………………… — skipped (no --dkim-selector/--dkim-key)"),
+                None => println!("  DKIM signing………………… — skipped (no key via flags or registry)"),
             }
 
             let envelope = Envelope {
@@ -261,4 +285,49 @@ fn keygen(selector: &str, domain: Option<&str>, out: &std::path::Path, force: bo
         out.display()
     );
     0
+}
+
+/// Finds and loads `mailbourne.toml`.
+///
+/// Search order: `--config` flag, `$MAILBOURNE_CONFIG`, `./mailbourne.toml`,
+/// `/var/mailbourne/mailbourne.toml` — first hit wins. No config anywhere is
+/// fine (flags and conventions carry the send); a config that EXISTS but
+/// won't parse is a hard stop — broken configuration must never be
+/// silently ignored.
+fn load_config(flag: Option<&std::path::Path>) -> Result<Option<mailbourne::config::Config>, i32> {
+    let explicit = flag
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::var_os("MAILBOURNE_CONFIG").map(Into::into));
+
+    if let Some(path) = explicit {
+        // Asked for by name: it must exist and it must parse.
+        return match mailbourne::config::Config::load(&path) {
+            Ok(config) => {
+                println!("  using {}", path.display());
+                Ok(Some(config))
+            }
+            Err(e) => {
+                eprintln!("✗ {e}");
+                Err(2)
+            }
+        };
+    }
+
+    for candidate in ["mailbourne.toml", "/var/mailbourne/mailbourne.toml"] {
+        let path = std::path::Path::new(candidate);
+        if path.exists() {
+            return match mailbourne::config::Config::load(path) {
+                Ok(config) => {
+                    println!("  using {}", path.display());
+                    Ok(Some(config))
+                }
+                Err(e) => {
+                    eprintln!("✗ your config has a problem — fix it rather than let me guess:");
+                    eprintln!("  {e}");
+                    Err(2)
+                }
+            };
+        }
+    }
+    Ok(None)
 }
