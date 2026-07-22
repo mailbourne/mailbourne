@@ -1,6 +1,6 @@
 //! # report — the one struct every skin renders
 //!
-//! A [`ChecklistReport`] is the doctor's complete answer for a domain:
+//! A [`ChecklistReport`] is the inspector's complete answer for a domain:
 //! every atom, with status and evidence, in wing order. The log narrator
 //! diffs two reports to speak in deltas; the CLI prints one as cards;
 //! `--json` serializes it; a downstream app walks `items` and renders its
@@ -8,7 +8,7 @@
 
 use crate::atom::ChecklistItem;
 
-/// The doctor's complete findings for one domain.
+/// The inspector's complete findings for one domain.
 #[derive(Debug, Clone)]
 pub struct ChecklistReport {
     /// The domain that was examined.

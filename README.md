@@ -1,8 +1,9 @@
-# mailbourne
+# Mailbourne
 
-> A Rust-native mail server and library — single binary, built-in doctor for
-> DNS, DKIM, and deliverability. Easy as your morning coffee.
-> *(working description — final copy to come)*
+> **A liveable mail server and library.**
+>
+> Single binary, Rust-native, with a built-in inspector for DNS, DKIM, and
+> deliverability.
 
 **Status: brewing.** ☕
 
@@ -16,7 +17,7 @@ Nothing to install yet. The name is reserved across
 - **One binary** that sends, receives, and explains itself — `mailbourne run`
   and the logs talk you through everything still missing, from DKIM records
   to PTR tickets.
-- **A built-in doctor** — `mailbourne doctor --domain example.com` probes any
+- **A built-in inspector** — `mailbourne inspect --domain example.com` probes any
   domain's mail health (MX, SPF, DKIM, DMARC, TLS, PTR, blocklists) and
   teaches as it diagnoses. Works on your existing mail setup, no install.
 - **A library** — the same engine embeds in Rust applications

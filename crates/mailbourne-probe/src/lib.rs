@@ -2,7 +2,7 @@
 //!
 //! A probe asks **one question** about how the outside world sees a mail
 //! server, and returns **typed evidence** — never a bare bool, never a
-//! rendered string. The doctor judges evidence; renderers display it; this
+//! rendered string. The inspector judges evidence; renderers display it; this
 //! crate only gathers it.
 //!
 //! Three rules keep probes honest:

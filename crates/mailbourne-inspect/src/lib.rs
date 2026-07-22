@@ -1,4 +1,4 @@
-//! # mailbourne-doctor — the judge
+//! # mailbourne-inspect — the judge
 //!
 //! Turns probe evidence into a [`report::ChecklistReport`]: which checks
 //! pass, which fail, what to do about each, and the explanation a beginner
@@ -12,7 +12,7 @@
 //! (can the world reach me?). Each item is an [`atom::ChecklistItem`] —
 //! WHAT/WHY/DO/VERIFY/LEARN as structured fields.
 //!
-//! The doctor's verification accuracy is the highest-stakes code in the
+//! The inspector's verification accuracy is the highest-stakes code in the
 //! project: **a wrong green checkmark is the one unforgivable bug.**
 
 pub mod atom;

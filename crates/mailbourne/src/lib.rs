@@ -1,6 +1,6 @@
 //! # mailbourne — the face
 //!
-//! A Rust-native mail server and library — single binary, built-in doctor
+//! A liveable mail server and library — single binary, built-in inspector
 //! for DNS, DKIM, and deliverability.
 //!
 //! This facade crate is the one public name: the `mailbourne` binary for
@@ -12,7 +12,7 @@
 //! Current state: the outbound path works end to end — compose, DKIM-sign,
 //! route by MX, dial with STARTTLS, speak the dialogue, classify the
 //! outcome. The builder facade (`Mailbourne::builder()`), inbound, and the
-//! doctor arrive next.
+//! inspector arrive next.
 
 pub mod compose;
 

@@ -159,7 +159,7 @@ jobs:
         run: |
           cargo publish -p mailbourne-core --allow-dirty
           cargo publish -p mailbourne-probe --allow-dirty
-          cargo publish -p mailbourne-doctor --allow-dirty
+          cargo publish -p mailbourne-inspect --allow-dirty
           cargo publish -p mailbourne-out --allow-dirty
           cargo publish -p mailbourne --allow-dirty
         env:

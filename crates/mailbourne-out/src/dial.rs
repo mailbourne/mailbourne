@@ -26,7 +26,7 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 #[derive(Debug, thiserror::Error)]
 pub enum DialError {
     /// Nobody answered within the timeout. On port 25 this is very often a
-    /// provider block ("filtered"), not a dead server — the doctor's S1
+    /// provider block ("filtered"), not a dead server — the inspector's S1
     /// check exists exactly for this signature.
     #[error("timed out dialing {addr} after {waited:?}")]
     Timeout {

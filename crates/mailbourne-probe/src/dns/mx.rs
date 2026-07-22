@@ -6,5 +6,5 @@
 //! to the domain's A record (RFC 5321 §5.1); `MX 0 .` ("null MX", RFC 7505)
 //! means "this domain refuses all mail."
 //!
-//! The outbound sender ([`mailbourne-out`]'s `route` step) and the doctor's
+//! The outbound sender ([`mailbourne-out`]'s `route` step) and the inspector's
 //! R1 check both ride this probe — one implementation, two consumers.

@@ -1,6 +1,6 @@
 [package]
 name = "mailbourne"
-description = "A Rust-native mail server and library — single binary, built-in doctor for DNS, DKIM, and deliverability."
+description = "A liveable mail server and library — single binary, Rust-native, with a built-in inspector for DNS, DKIM, and deliverability."
 keywords = ["mail", "smtp", "email", "server", "self-hosted"]
 categories = ["email", "network-programming"]
 readme = "README.md"

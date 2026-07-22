@@ -1,6 +1,6 @@
 # mailbourne
 
-A Rust-native mail server and library — single binary, built-in doctor for
+A liveable mail server and library — single binary, built-in inspector for
 DNS, DKIM, and deliverability.
 
 This is an early name-reservation release; the engine is still brewing.

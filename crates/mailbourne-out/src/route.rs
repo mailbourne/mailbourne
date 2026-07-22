@@ -8,7 +8,7 @@
 //!
 //! The decision itself ([`plan`]) is pure logic, separated from the DNS
 //! lookup so it can be tested exhaustively without a network — and so the
-//! doctor's R1 check can reuse it against probe evidence.
+//! inspector's R1 check can reuse it against probe evidence.
 
 /// One MX candidate: a priority number and the host to dial.
 ///

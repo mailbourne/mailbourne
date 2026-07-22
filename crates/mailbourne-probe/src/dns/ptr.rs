@@ -7,4 +7,4 @@
 //!
 //! PTR records are owned by whoever owns the IP (the VPS provider), not by
 //! your DNS zone — this probe detects the mismatch; fixing it needs a
-//! provider ticket, and the doctor supplies the text.
+//! provider ticket, and the inspector supplies the text.

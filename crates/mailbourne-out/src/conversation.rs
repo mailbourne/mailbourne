@@ -260,7 +260,7 @@ where
         .any(|cap| cap.eq_ignore_ascii_case("STARTTLS"));
     if !offers_tls {
         // Opportunistic: no offer means we proceed in plaintext rather
-        // than fail — the doctor's job is to notice and say so.
+        // than fail — the inspector's job is to notice and say so.
         return finish_dialogue(chat, envelope, message).await;
     }
 

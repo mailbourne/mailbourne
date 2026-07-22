@@ -6,5 +6,5 @@
 //! reports what happened — connected, refused, or filtered-into-silence
 //! (the telltale signature of a provider block).
 //!
-//! Used by the doctor's S1 (can I dial out to a remote 25?) and, from an
+//! Used by the inspector's S1 (can I dial out to a remote 25?) and, from an
 //! external vantage point, R2 (can the world dial *my* 25?).

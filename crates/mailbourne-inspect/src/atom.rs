@@ -1,10 +1,10 @@
 //! # atom — one checklist item, as data
 //!
-//! Every check the doctor performs is an *atom* with five faces: WHAT (an
+//! Every check the inspector performs is an *atom* with five faces: WHAT (an
 //! analogy), WHY (the consequence), DO (a copy-paste artifact and
 //! provider-specific instructions), VERIFY (live probe evidence), and LEARN
 //! (a pointer into the built-in encyclopedia). The same atom renders as a
-//! one-line log delta, a full card in `mailbourne doctor`, or a widget in a
+//! one-line log delta, a full card in `mailbourne inspect`, or a widget in a
 //! downstream app — because it is data, not text.
 
 /// The verified state of one checklist item.
