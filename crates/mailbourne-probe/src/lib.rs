@@ -21,3 +21,12 @@ pub mod blocklist;
 pub mod dial;
 pub mod dns;
 pub mod tls;
+
+/// Why a probe could not even ask its question.
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    /// DNS resolution itself failed — network trouble, not an answer.
+    /// Temporary: retry later rather than concluding anything.
+    #[error("dns lookup failed: {0}")]
+    Dns(String),
+}

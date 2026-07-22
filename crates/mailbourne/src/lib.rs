@@ -16,10 +16,12 @@
 
 pub mod compose;
 pub mod identity;
+pub mod sheet;
 
 pub use mailbourne_core::config;
 pub use mailbourne_core::{EmailAddress, Envelope, MailEvent, Message};
 pub use mailbourne_out as out;
+pub use mailbourne_probe as probe;
 
 /// The crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

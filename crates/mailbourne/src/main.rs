@@ -63,6 +63,30 @@ enum Command {
         #[command(subcommand)]
         command: DnsCommand,
     },
+    /// Manage the domains this server sends and receives for.
+    Domain {
+        #[command(subcommand)]
+        command: DomainCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DomainCommand {
+    /// The record sheet for one domain: what to paste, judged against
+    /// what's actually published right now.
+    Show {
+        /// The domain (must be in the registry).
+        name: String,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Every managed domain, one line each.
+    List {
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -211,6 +235,10 @@ async fn run(cli: Cli) -> i32 {
                 }
             }
         }
+        Command::Domain { command } => match command {
+            DomainCommand::Show { name, config } => domain_show(&name, config.as_deref()).await,
+            DomainCommand::List { config } => domain_list(config.as_deref()),
+        },
         Command::Dns { command } => match command {
             DnsCommand::Keygen {
                 selector,
@@ -330,4 +358,151 @@ fn load_config(flag: Option<&std::path::Path>) -> Result<Option<mailbourne::conf
         }
     }
     Ok(None)
+}
+
+/// Loads the config or explains, in one line, how to get one.
+fn require_config(flag: Option<&std::path::Path>) -> Result<mailbourne::config::Config, i32> {
+    match load_config(flag)? {
+        Some(config) => Ok(config),
+        None => {
+            eprintln!("✗ no mailbourne.toml found — nothing is registered yet.");
+            eprintln!("  start one next to your keys, or point me at it with --config.");
+            Err(2)
+        }
+    }
+}
+
+/// `mailbourne domain list` — every letterhead, one line each.
+fn domain_list(config_flag: Option<&std::path::Path>) -> i32 {
+    let config = match require_config(config_flag) {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    if config.domains.is_empty() {
+        println!("no domains registered yet — adopt one with: mailbourne domain add <name>");
+        return 0;
+    }
+    println!("server: {}", config.server.hostname);
+    for domain in &config.domains {
+        let mode = match domain.mode {
+            mailbourne::config::Mode::Out => "out ",
+            mailbourne::config::Mode::In => "in  ",
+            mailbourne::config::Mode::Both => "both",
+        };
+        let key = match &domain.dkim_key {
+            Some(path) if path.exists() => "key ✓",
+            Some(_) => "key MISSING",
+            None => "no key",
+        };
+        let selector = domain.dkim_selector.as_deref().unwrap_or("—");
+        println!(
+            "  {:<28} mode {}  selector {:<10} {}",
+            domain.name, mode, selector, key
+        );
+    }
+    0
+}
+
+/// `mailbourne domain show <name>` — the sheet, judged live.
+async fn domain_show(name: &str, config_flag: Option<&std::path::Path>) -> i32 {
+    use mailbourne::sheet::{self, RowStatus};
+
+    let config = match require_config(config_flag) {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let Some(domain) = config.domain(name) else {
+        eprintln!("✗ {name} isn't in the registry — adopt it with: mailbourne domain add {name}");
+        return 2;
+    };
+
+    println!("  asking DNS how the world sees {name} right now…");
+    let selector = domain.dkim_selector.clone();
+    let dkim_host = selector
+        .as_deref()
+        .map(|s| format!("{s}._domainkey.{name}"));
+
+    let domain_txt = mailbourne::probe::dns::txt(name).await.unwrap_or_default();
+    let dkim_txt = match &dkim_host {
+        Some(host) => mailbourne::probe::dns::txt(host).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let dmarc_txt = mailbourne::probe::dns::txt(&format!("_dmarc.{name}"))
+        .await
+        .unwrap_or_default();
+    let server_ip = mailbourne::probe::dns::a(&config.server.hostname)
+        .await
+        .unwrap_or_default()
+        .first()
+        .copied();
+
+    let dkim_record_from_key = domain
+        .dkim_key
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|pem| mailbourne::out::sign::public_record_for(&pem).ok());
+
+    let evidence = sheet::Evidence {
+        domain_txt,
+        dkim_txt,
+        dmarc_txt,
+        server_ip,
+        dkim_record_from_key,
+    };
+    let sheet = sheet::build(
+        name,
+        domain.mode,
+        selector.as_deref(),
+        &config.server.hostname,
+        &evidence,
+    );
+
+    println!();
+    println!(
+        "── {name} · server {}{} ──",
+        config.server.hostname,
+        match server_ip {
+            Some(ip) => format!(" ({ip})"),
+            None => " (does not resolve!)".to_string(),
+        }
+    );
+    println!();
+    let mut to_do = 0;
+    for row in &sheet.rows {
+        let (glyph, verb) = match &row.status {
+            RowStatus::Add => {
+                to_do += 1;
+                ("+", "ADD")
+            }
+            RowStatus::AlreadyCorrect => ("✓", "already sorted"),
+            RowStatus::Replace { .. } => {
+                to_do += 1;
+                ("↻", "REPLACE")
+            }
+            RowStatus::Broken { .. } => {
+                to_do += 1;
+                ("✗", "NEEDS A DECISION")
+            }
+        };
+        println!("  {glyph} [{verb}]  {}  {}", row.rtype, row.host);
+        if let RowStatus::Broken { why } = &row.status {
+            println!("      {why}");
+        } else if !row.value.is_empty() {
+            println!("      {}", row.value);
+        }
+        if let RowStatus::Replace { current } = &row.status {
+            println!("      (currently: {current})");
+        }
+        println!();
+    }
+    for note in &sheet.notes {
+        println!("  · {note}");
+    }
+    println!();
+    if to_do == 0 {
+        println!("  lovely — nothing to paste; {name} is all sorted. ☕");
+    } else {
+        println!("  {to_do} to paste · re-run me after DNS settles (usually minutes)");
+    }
+    0
 }

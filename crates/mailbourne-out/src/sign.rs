@@ -125,6 +125,34 @@ pub fn generate_dkim_keypair() -> Result<DkimKeypair, SignError> {
     })
 }
 
+/// Recovers the publishable DNS record from an existing private key —
+/// the same `v=DKIM1; k=rsa; p=…` line [`generate_dkim_keypair`] hands out,
+/// but derived from a key you already have (either PEM container).
+///
+/// This is what lets `domain show` print the DKIM row from the key on
+/// disk, and what lets the inspector catch the classic silent failure:
+/// a key that no longer matches the record DNS is serving.
+///
+/// # Errors
+/// [`SignError::BadKey`] when the PEM can't be read as an RSA key.
+pub fn public_record_for(private_key_pem: &str) -> Result<String, SignError> {
+    use base64::Engine;
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
+
+    // Either envelope: PKCS#8 ("BEGIN PRIVATE KEY") or PKCS#1
+    // ("BEGIN RSA PRIVATE KEY") — same key inside.
+    let private = rsa::RsaPrivateKey::from_pkcs8_pem(private_key_pem)
+        .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(private_key_pem))
+        .map_err(|e| SignError::BadKey(e.to_string()))?;
+
+    let spki = rsa::RsaPublicKey::from(&private)
+        .to_public_key_der()
+        .map_err(|e| SignError::Signing(e.to_string()))?;
+    let p = base64::engine::general_purpose::STANDARD.encode(spki.as_bytes());
+    Ok(format!("v=DKIM1; k=rsa; p={p}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,7 +161,7 @@ mod tests {
     /// private half lives in a public repo, so it must never sign real
     /// mail. (2048 is also the floor the crypto backend enforces, and the
     /// production standard for DKIM.)
-    const TEST_KEY: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+    pub(super) const TEST_KEY: &str = r#"-----BEGIN RSA PRIVATE KEY-----
 MIIEowIBAAKCAQEAslYW5+62eTeuYabVNJNDqdrerunNqpjKSC8a4VsMypsvQHFl
 p3Mi75mUVFw341oKP2RqheNxI27mE4EDjrrpL0P5YaBugxKiZcW03LGjqqrUQZhV
 mROkENOx2IfS2Wu9Q/88Ixg89HWWWencTkCQ5DNwvzi6JWvMYEql/amiePoardz8
@@ -208,7 +236,7 @@ wax and string\r\n";
     /// (`BEGIN PRIVATE KEY`) — what OpenSSL 3 writes by default. Both
     /// containers must work; "regenerate your key in the other format"
     /// is not an answer a mail engine gets to give.
-    const TEST_KEY_PKCS8: &str = r#"-----BEGIN PRIVATE KEY-----
+    pub(super) const TEST_KEY_PKCS8: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCyVhbn7rZ5N65h
 ptU0k0Op2t6u6c2qmMpILxrhWwzKmy9AcWWncyLvmZRUXDfjWgo/ZGqF43EjbuYT
 gQOOuukvQ/lhoG6DEqJlxbTcsaOqqtRBmFWZE6QQ07HYh9LZa71D/zwjGDz0dZZZ
@@ -270,6 +298,31 @@ A5SMBYtkBY6JTg0OXX82Aso=
 #[cfg(test)]
 mod keygen_tests {
     use super::*;
+
+    #[test]
+    fn the_public_record_is_recovered_from_a_private_key() {
+        let pair = generate_dkim_keypair().unwrap();
+        let recovered = public_record_for(&pair.private_key_pem).unwrap();
+        assert_eq!(recovered, pair.dns_record_value);
+    }
+
+    #[test]
+    fn recovery_works_for_the_pkcs1_container_too() {
+        // TEST_KEY (PKCS#1) and TEST_KEY_PKCS8 hold the same key — the
+        // recovered record must be identical from either envelope.
+        let a = public_record_for(super::tests::TEST_KEY).unwrap();
+        let b = public_record_for(super::tests::TEST_KEY_PKCS8).unwrap();
+        assert_eq!(a, b);
+        assert!(a.starts_with("v=DKIM1; k=rsa; p="));
+    }
+
+    #[test]
+    fn garbage_is_refused_as_a_bad_key() {
+        assert!(matches!(
+            public_record_for("not a key"),
+            Err(SignError::BadKey(_))
+        ));
+    }
 
     #[test]
     fn a_minted_key_signs_a_message_successfully() {

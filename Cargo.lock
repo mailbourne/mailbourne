@@ -1015,6 +1015,7 @@ dependencies = [
  "clap",
  "mailbourne-core",
  "mailbourne-out",
+ "mailbourne-probe",
  "tokio",
 ]
 
@@ -1053,6 +1054,11 @@ dependencies = [
 [[package]]
 name = "mailbourne-probe"
 version = "0.0.4"
+dependencies = [
+ "hickory-resolver 0.24.4",
+ "thiserror 2.0.19",
+ "tokio",
+]
 
 [[package]]
 name = "memchr"

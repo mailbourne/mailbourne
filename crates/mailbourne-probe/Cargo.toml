@@ -9,3 +9,10 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror = "2"
+hickory-resolver = "0.24"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
