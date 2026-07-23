@@ -274,6 +274,66 @@ pub fn merge_spf(existing: &str, ip: std::net::Ipv4Addr) -> String {
     }
 }
 
+/// A rendered sheet ready to print, plus how many rows still need action.
+pub struct Rendered {
+    /// The formatted block.
+    pub text: String,
+    /// How many rows still need the user to do something.
+    pub to_do: usize,
+}
+
+/// Renders a sheet as the human-facing block — shared by `domain show` and
+/// the console, so both speak with one voice.
+pub fn render(
+    sheet: &Sheet,
+    domain: &str,
+    server_hostname: &str,
+    server_ip: Option<std::net::Ipv4Addr>,
+) -> Rendered {
+    use std::fmt::Write;
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "── {domain} · server {server_hostname}{} ──\n",
+        match server_ip {
+            Some(ip) => format!(" ({ip})"),
+            None => " (does not resolve yet!)".to_string(),
+        }
+    );
+    let mut to_do = 0;
+    for row in &sheet.rows {
+        let (glyph, verb) = match &row.status {
+            RowStatus::Add => {
+                to_do += 1;
+                ("+", "ADD")
+            }
+            RowStatus::AlreadyCorrect => ("✓", "already sorted"),
+            RowStatus::Replace { .. } => {
+                to_do += 1;
+                ("↻", "REPLACE")
+            }
+            RowStatus::Broken { .. } => {
+                to_do += 1;
+                ("✗", "NEEDS A DECISION")
+            }
+        };
+        let _ = writeln!(text, "  {glyph} [{verb}]  {}  {}", row.rtype, row.host);
+        if let RowStatus::Broken { why } = &row.status {
+            let _ = writeln!(text, "      {why}");
+        } else if !row.value.is_empty() {
+            let _ = writeln!(text, "      {}", row.value);
+        }
+        if let RowStatus::Replace { current } = &row.status {
+            let _ = writeln!(text, "      (currently: {current})");
+        }
+        let _ = writeln!(text);
+    }
+    for note in &sheet.notes {
+        let _ = writeln!(text, "  · {note}");
+    }
+    Rendered { text, to_do }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +352,27 @@ mod tests {
                 r.value.starts_with("v=spf1") || matches!(&r.status, RowStatus::Broken { .. })
             })
             .expect("sheet always has an SPF row")
+    }
+
+    #[test]
+    fn render_counts_action_rows_and_shows_full_values() {
+        let sheet = build(
+            "ds.example.com",
+            Mode::Out,
+            Some("s1"),
+            "mail.hq.example.com",
+            &Evidence {
+                server_ip: Some(ip()),
+                ..Default::default()
+            },
+        );
+        let r = render(&sheet, "ds.example.com", "mail.hq.example.com", Some(ip()));
+        // SPF add + DMARC add + DKIM missing = 3 things to do.
+        assert!(r.to_do >= 2, "expected action rows, got {}", r.to_do);
+        assert!(
+            r.text.contains(&format!("ip4:{IP}")),
+            "values must not be truncated"
+        );
     }
 
     #[test]

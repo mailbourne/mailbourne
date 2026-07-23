@@ -15,7 +15,9 @@
 //! inspector arrive next.
 
 pub mod compose;
+pub mod console;
 pub mod identity;
+pub mod inspect;
 pub mod sheet;
 
 pub use mailbourne_core::config;

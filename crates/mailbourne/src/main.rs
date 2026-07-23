@@ -17,7 +17,7 @@ use mailbourne::{EmailAddress, Envelope};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -113,12 +113,17 @@ enum DnsCommand {
 fn main() {
     let cli = Cli::parse();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let code = runtime.block_on(run(cli));
+    let code = match cli.command {
+        // Bare `mailbourne` (a human, no subcommand) → the console.
+        // Called from the main thread, so the console may `handle.block_on`.
+        None => mailbourne::console::run(runtime.handle(), None),
+        Some(command) => runtime.block_on(run_command(command)),
+    };
     std::process::exit(code);
 }
 
-async fn run(cli: Cli) -> i32 {
-    match cli.command {
+async fn run_command(command: Command) -> i32 {
+    match command {
         Command::Send {
             to,
             from,
@@ -404,106 +409,29 @@ fn domain_list(config_flag: Option<&std::path::Path>) -> i32 {
     0
 }
 
-/// `mailbourne domain show <name>` — the sheet, judged live.
+/// `mailbourne domain show <name>` — the sheet, judged live. Shares its
+/// gathering and rendering with the console (see `inspect` + `sheet::render`).
 async fn domain_show(name: &str, config_flag: Option<&std::path::Path>) -> i32 {
-    use mailbourne::sheet::{self, RowStatus};
-
     let config = match require_config(config_flag) {
         Ok(config) => config,
         Err(code) => return code,
     };
-    let Some(domain) = config.domain(name) else {
+
+    println!("  asking DNS how the world sees {name} right now…");
+    let Some((sheet, ip)) = mailbourne::inspect::domain(&config, name).await else {
         eprintln!("✗ {name} isn't in the registry — adopt it with: mailbourne domain add {name}");
         return 2;
     };
 
-    println!("  asking DNS how the world sees {name} right now…");
-    let selector = domain.dkim_selector.clone();
-    let dkim_host = selector
-        .as_deref()
-        .map(|s| format!("{s}._domainkey.{name}"));
-
-    let domain_txt = mailbourne::probe::dns::txt(name).await.unwrap_or_default();
-    let dkim_txt = match &dkim_host {
-        Some(host) => mailbourne::probe::dns::txt(host).await.unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let dmarc_txt = mailbourne::probe::dns::txt(&format!("_dmarc.{name}"))
-        .await
-        .unwrap_or_default();
-    let server_ip = mailbourne::probe::dns::a(&config.server.hostname)
-        .await
-        .unwrap_or_default()
-        .first()
-        .copied();
-
-    let dkim_record_from_key = domain
-        .dkim_key
-        .as_deref()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|pem| mailbourne::out::sign::public_record_for(&pem).ok());
-
-    let evidence = sheet::Evidence {
-        domain_txt,
-        dkim_txt,
-        dmarc_txt,
-        server_ip,
-        dkim_record_from_key,
-    };
-    let sheet = sheet::build(
-        name,
-        domain.mode,
-        selector.as_deref(),
-        &config.server.hostname,
-        &evidence,
-    );
-
-    println!();
-    println!(
-        "── {name} · server {}{} ──",
-        config.server.hostname,
-        match server_ip {
-            Some(ip) => format!(" ({ip})"),
-            None => " (does not resolve!)".to_string(),
-        }
-    );
-    println!();
-    let mut to_do = 0;
-    for row in &sheet.rows {
-        let (glyph, verb) = match &row.status {
-            RowStatus::Add => {
-                to_do += 1;
-                ("+", "ADD")
-            }
-            RowStatus::AlreadyCorrect => ("✓", "already sorted"),
-            RowStatus::Replace { .. } => {
-                to_do += 1;
-                ("↻", "REPLACE")
-            }
-            RowStatus::Broken { .. } => {
-                to_do += 1;
-                ("✗", "NEEDS A DECISION")
-            }
-        };
-        println!("  {glyph} [{verb}]  {}  {}", row.rtype, row.host);
-        if let RowStatus::Broken { why } = &row.status {
-            println!("      {why}");
-        } else if !row.value.is_empty() {
-            println!("      {}", row.value);
-        }
-        if let RowStatus::Replace { current } = &row.status {
-            println!("      (currently: {current})");
-        }
-        println!();
-    }
-    for note in &sheet.notes {
-        println!("  · {note}");
-    }
-    println!();
-    if to_do == 0 {
+    let rendered = mailbourne::sheet::render(&sheet, name, &config.server.hostname, ip);
+    println!("\n{}", rendered.text);
+    if rendered.to_do == 0 {
         println!("  lovely — nothing to paste; {name} is all sorted. ☕");
     } else {
-        println!("  {to_do} to paste · re-run me after DNS settles (usually minutes)");
+        println!(
+            "  {} to paste · re-run me after DNS settles (usually minutes)",
+            rendered.to_do
+        );
     }
     0
 }
