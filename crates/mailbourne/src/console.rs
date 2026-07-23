@@ -7,12 +7,12 @@
 //!
 //! Inline flowing prompts (not an alt-screen TUI) — copy-paste of records
 //! stays trivial, it's robust over SSH and `docker exec`, and it matches
-//! the "logs are the mentor" voice. A status header prints fresh atop each
-//! home loop for the at-a-glance view.
+//! the "logs are the mentor" voice.
 //!
-//! The pure screen logic ([`status_header`], [`home_labels`],
-//! [`home_choice`]) is testable without a terminal; the interactive loop is
-//! a thin `dialoguer` shell over it.
+//! The tone is encouragement, never blame: a domain has "N to improve",
+//! never "N errors". The pure screen logic ([`encouragement`],
+//! [`home_labels`], [`home_choice`]) is testable without a terminal; the
+//! interactive loop is a thin `dialoguer` shell over it.
 
 use mailbourne_core::config::{Config, Mode};
 
@@ -24,70 +24,109 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
-/// The status board printed atop each home loop. **Local info only** (mode,
-/// key on disk) — cheap, no DNS. Live health is the domain screen's
-/// inspect, so the loop stays snappy.
-pub(crate) fn status_header(config: &Config) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    let _ = writeln!(out, "☕ {}", config.server.hostname);
-    if config.domains.is_empty() {
-        let _ = writeln!(out, "\n  no domains yet — add one to get started.");
-        return out;
+/// A domain's headline status for the home list: how many records still
+/// want attention. `None` means we couldn't check (no network / not probed).
+#[derive(Debug, Clone)]
+pub(crate) struct DomainStatus {
+    /// The domain name.
+    pub name: String,
+    /// Its direction.
+    pub mode: Mode,
+    /// Count of records to improve, or `None` if unchecked.
+    pub to_do: Option<usize>,
+}
+
+/// The encouraging one-liner for a domain's status. Never "error" — Chloe
+/// frames everything as growth: all sorted, or `N to improve`.
+pub(crate) fn encouragement(to_do: Option<usize>) -> String {
+    match to_do {
+        Some(0) => "all sorted ☕".to_string(),
+        Some(n) => format!("{n} to improve"),
+        None => "let's have a look".to_string(),
     }
-    let _ = writeln!(out, "\n  DOMAINS");
-    for d in &config.domains {
-        let key = match &d.dkim_key {
-            Some(p) if p.exists() => "key ✓",
-            Some(_) => "key missing",
-            None => "no key",
-        };
-        let _ = writeln!(out, "    {:<26} {:<14} {}", d.name, mode_label(d.mode), key);
-    }
-    out
+}
+
+/// Home-menu labels: each domain as a selectable status line, then the
+/// add / server / refresh / quit actions.
+pub(crate) fn home_labels(statuses: &[DomainStatus]) -> Vec<String> {
+    let mut items: Vec<String> = statuses
+        .iter()
+        .map(|s| {
+            let who = format!("*@{}", s.name);
+            format!(
+                "{:<26} {:<16} {}",
+                who,
+                mode_label(s.mode),
+                encouragement(s.to_do)
+            )
+        })
+        .collect();
+    items.push("＋ add a domain".into());
+    items.push("⚙  server settings".into());
+    items.push("↻ refresh".into());
+    items.push("quit".into());
+    items
 }
 
 /// What a home-menu index means.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HomeChoice {
-    /// Drill into the domain at this registry index.
+    /// Drill into the domain at this index.
     Domain(usize),
     /// Add a new domain.
     Add,
     /// Open the server screen.
     Server,
+    /// Re-probe every domain's status.
+    Refresh,
     /// Leave.
     Quit,
 }
 
-/// Home-menu labels: every domain, then add / server / quit.
-pub(crate) fn home_labels(config: &Config) -> Vec<String> {
-    let mut items: Vec<String> = config
-        .domains
-        .iter()
-        .map(|d| format!("{}   ({})", d.name, mode_label(d.mode)))
-        .collect();
-    items.push("＋ add a domain".into());
-    items.push("⚙  server settings".into());
-    items.push("quit".into());
-    items
-}
-
-/// Maps a selected home index to its meaning.
-pub(crate) fn home_choice(config: &Config, selected: usize) -> HomeChoice {
-    let n = config.domains.len();
+/// Maps a selected home index to its meaning, given how many domains lead
+/// the list.
+pub(crate) fn home_choice(domain_count: usize, selected: usize) -> HomeChoice {
+    let n = domain_count;
     if selected < n {
         HomeChoice::Domain(selected)
     } else if selected == n {
         HomeChoice::Add
     } else if selected == n + 1 {
         HomeChoice::Server
+    } else if selected == n + 2 {
+        HomeChoice::Refresh
     } else {
         HomeChoice::Quit
     }
 }
 
 // ── interactive loop (needs a TTY; gated behind the cli feature) ──────
+
+/// Gathers each domain's live status (records still to improve). Sequential
+/// — fine for a handful of domains; concurrency is a later optimisation.
+#[cfg(feature = "cli")]
+async fn gather_home_status(config: &Config) -> Vec<DomainStatus> {
+    use crate::sheet::RowStatus;
+    let mut out = Vec::new();
+    for d in &config.domains {
+        let to_do = match crate::inspect::domain(config, &d.name).await {
+            Some((sheet, _)) => Some(
+                sheet
+                    .rows
+                    .iter()
+                    .filter(|r| !matches!(r.status, RowStatus::AlreadyCorrect))
+                    .count(),
+            ),
+            None => None,
+        };
+        out.push(DomainStatus {
+            name: d.name.clone(),
+            mode: d.mode,
+            to_do,
+        });
+    }
+    out
+}
 
 /// Runs the console. Sync (dialoguer is blocking); async probes go through
 /// `handle`, which is safe because this is called from the main thread,
@@ -107,9 +146,15 @@ pub fn run(handle: &tokio::runtime::Handle, config_path: Option<std::path::PathB
         },
     };
 
+    println!("\n  checking your domains…");
+    let mut statuses = handle.block_on(gather_home_status(&config));
+
     loop {
-        println!("\n{}", status_header(&config));
-        let labels = home_labels(&config);
+        println!("\n☕ {}", config.server.hostname);
+        if statuses.is_empty() {
+            println!("  no domains yet — add one to get started.");
+        }
+        let labels = home_labels(&statuses);
         let sel = match Select::with_theme(&theme)
             .items(&labels)
             .default(0)
@@ -121,16 +166,24 @@ pub fn run(handle: &tokio::runtime::Handle, config_path: Option<std::path::PathB
                 return 0;
             }
         };
-        match home_choice(&config, sel) {
-            HomeChoice::Domain(i) => domain_screen(handle, &theme, &config, i),
+        match home_choice(statuses.len(), sel) {
+            HomeChoice::Domain(i) => {
+                domain_screen(handle, &theme, &config, i);
+                statuses = handle.block_on(gather_home_status(&config));
+            }
             HomeChoice::Add => {
                 if add_domain(&theme, &path, &config) {
                     if let Ok(fresh) = Config::load(&path) {
                         config = fresh;
                     }
+                    statuses = handle.block_on(gather_home_status(&config));
                 }
             }
             HomeChoice::Server => server_screen(handle, &theme, &config),
+            HomeChoice::Refresh => {
+                println!("  checking…");
+                statuses = handle.block_on(gather_home_status(&config));
+            }
             HomeChoice::Quit => {
                 println!("  ☕ see you.");
                 return 0;
@@ -149,7 +202,7 @@ fn domain_screen(
     use dialoguer::Select;
     let domain = &config.domains[idx];
     loop {
-        println!("\n☕ {}  ·  {}", domain.name, mode_label(domain.mode));
+        println!("\n☕ *@{}  ·  {}", domain.name, mode_label(domain.mode));
         let labels = ["check what's live (inspect)", "back"];
         let sel = match Select::with_theme(theme)
             .items(&labels)
@@ -173,7 +226,7 @@ fn domain_screen(
                 if r.to_do == 0 {
                     println!("  lovely — nothing to paste; all sorted. ☕");
                 } else {
-                    println!("  {} to sort · inspect again after DNS settles", r.to_do);
+                    println!("  {} to improve · inspect again after DNS settles", r.to_do);
                 }
             }
             None => println!("  (couldn't find {} in the registry — odd.)", domain.name),
@@ -294,7 +347,7 @@ fn add_domain(
         "    {selector}._domainkey.{name}   TXT   {}",
         pair.dns_record_value
     );
-    println!("\n  then open {name} from the menu and 'inspect' to watch it land. ☕");
+    println!("\n  then open *@{name} from the menu and 'inspect' to watch it land. ☕");
     true
 }
 
@@ -365,49 +418,61 @@ fn first_run(theme: &dialoguer::theme::ColorfulTheme) -> Option<(std::path::Path
 mod tests {
     use super::*;
 
-    fn registry(n: usize) -> Config {
-        let mut toml = String::from("[server]\nhostname = \"mail.hq.example.com\"\n");
-        for i in 0..n {
-            toml.push_str(&format!(
-                "\n[[domain]]\nname = \"d{i}.example.com\"\nmode = \"out\"\n"
-            ));
-        }
-        Config::parse_toml(&toml).unwrap()
+    fn statuses() -> Vec<DomainStatus> {
+        vec![
+            DomainStatus {
+                name: "musiklib.org".into(),
+                mode: Mode::Both,
+                to_do: Some(0),
+            },
+            DomainStatus {
+                name: "id.zebflow.com".into(),
+                mode: Mode::Out,
+                to_do: Some(2),
+            },
+        ]
     }
 
     #[test]
-    fn status_header_lists_every_domain() {
-        let header = status_header(&registry(2));
-        assert!(header.contains("mail.hq.example.com"));
-        assert!(header.contains("d0.example.com"));
-        assert!(header.contains("d1.example.com"));
-        assert!(header.contains("no key")); // no dkim_key in the fixtures
+    fn encouragement_never_says_error() {
+        assert_eq!(encouragement(Some(0)), "all sorted ☕");
+        assert_eq!(encouragement(Some(2)), "2 to improve");
+        assert_eq!(encouragement(None), "let's have a look");
+        assert!(!encouragement(Some(3)).to_lowercase().contains("error"));
     }
 
     #[test]
-    fn an_empty_registry_invites_adding_one() {
-        let header = status_header(&registry(0));
-        assert!(header.contains("no domains yet"));
-    }
-
-    #[test]
-    fn home_menu_is_domains_then_add_server_quit() {
-        let config = registry(2);
-        let labels = home_labels(&config);
-        assert_eq!(labels.len(), 5); // 2 domains + add + server + quit
-        assert!(labels[0].contains("d0.example.com"));
+    fn home_lines_are_selectable_status_rows() {
+        let labels = home_labels(&statuses());
+        assert!(labels[0].contains("*@musiklib.org"));
+        assert!(labels[0].contains("all sorted"));
+        assert!(labels[1].contains("*@id.zebflow.com"));
+        assert!(labels[1].contains("2 to improve"));
+        // domains, then add / server / refresh / quit
+        assert_eq!(labels.len(), 6);
         assert!(labels[2].contains("add"));
         assert!(labels[3].contains("server"));
-        assert_eq!(labels[4], "quit");
+        assert!(labels[4].contains("refresh"));
+        assert_eq!(labels[5], "quit");
     }
 
     #[test]
-    fn home_choice_maps_indices_to_meaning() {
-        let config = registry(2);
-        assert_eq!(home_choice(&config, 0), HomeChoice::Domain(0));
-        assert_eq!(home_choice(&config, 1), HomeChoice::Domain(1));
-        assert_eq!(home_choice(&config, 2), HomeChoice::Add);
-        assert_eq!(home_choice(&config, 3), HomeChoice::Server);
-        assert_eq!(home_choice(&config, 4), HomeChoice::Quit);
+    fn home_choice_maps_indices_including_refresh() {
+        assert_eq!(home_choice(2, 0), HomeChoice::Domain(0));
+        assert_eq!(home_choice(2, 1), HomeChoice::Domain(1));
+        assert_eq!(home_choice(2, 2), HomeChoice::Add);
+        assert_eq!(home_choice(2, 3), HomeChoice::Server);
+        assert_eq!(home_choice(2, 4), HomeChoice::Refresh);
+        assert_eq!(home_choice(2, 5), HomeChoice::Quit);
+    }
+
+    #[test]
+    fn an_empty_registry_still_offers_the_actions() {
+        let labels = home_labels(&[]);
+        assert_eq!(
+            labels,
+            vec!["＋ add a domain", "⚙  server settings", "↻ refresh", "quit"]
+        );
+        assert_eq!(home_choice(0, 0), HomeChoice::Add);
     }
 }
