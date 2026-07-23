@@ -201,9 +201,33 @@ fn domain_screen(
 ) {
     use dialoguer::Select;
     let domain = &config.domains[idx];
+
+    // Land on the verdict, not a blank menu: inspect live on entry.
+    println!("\n  checking *@{} live…", domain.name);
+    let mut cached = handle.block_on(crate::inspect::domain(config, &domain.name));
+
     loop {
         println!("\n☕ *@{}  ·  {}", domain.name, mode_label(domain.mode));
-        let labels = ["check what's live (inspect)", "back"];
+        println!("   mail via {}", config.server.hostname);
+        match &cached {
+            Some((sheet, _)) => {
+                println!("\n   HEALTH");
+                print!("{}", crate::sheet::render_compact(sheet));
+                let to_do = crate::sheet::count_to_do(sheet);
+                println!("\n   {}", encouragement(Some(to_do)));
+            }
+            None => println!("\n   (couldn't reach DNS — try 're-check')"),
+        }
+
+        let labels = [
+            "re-check live",
+            "show records to publish",
+            "send a test email",
+            "rotate the DKIM key",
+            "change mode",
+            "remove this domain",
+            "back",
+        ];
         let sel = match Select::with_theme(theme)
             .items(&labels)
             .default(0)
@@ -212,25 +236,129 @@ fn domain_screen(
             Ok(Some(i)) => i,
             _ => return,
         };
-        if sel != 0 {
-            return;
+        match sel {
+            0 => {
+                println!(
+                    "\n  asking DNS how the world sees {} right now…",
+                    domain.name
+                );
+                cached = handle.block_on(crate::inspect::domain(config, &domain.name));
+            }
+            1 => match &cached {
+                Some((sheet, ip)) => {
+                    let r = crate::sheet::render(sheet, &domain.name, &config.server.hostname, *ip);
+                    println!("\n{}", r.text);
+                    if r.to_do == 0 {
+                        println!("  nothing to paste — all sorted. ☕");
+                    } else {
+                        println!("  {} to improve · paste, then 're-check'", r.to_do);
+                    }
+                }
+                None => println!("  re-check first — I couldn't reach DNS."),
+            },
+            2 => send_test(handle, theme, config, &domain.name),
+            3 => {
+                println!("\n  rotating a DKIM key — coming soon.");
+                println!("  it'll mint a fresh key under a new selector and keep the old");
+                println!("  one valid until you've published the new record. no downtime.");
+            }
+            4 => {
+                println!("\n  changing mode — coming soon (needs safe config editing).");
+                println!("  for now, edit the `mode` line in your mailbourne.toml by hand.");
+            }
+            5 => {
+                println!("\n  removing a domain — coming soon (needs safe config editing).");
+                println!("  for now, delete its [[domain]] block from mailbourne.toml.");
+            }
+            _ => return,
         }
-        println!(
-            "\n  asking DNS how the world sees {} right now…",
-            domain.name
-        );
-        match handle.block_on(crate::inspect::domain(config, &domain.name)) {
-            Some((sheet, ip)) => {
-                let r = crate::sheet::render(&sheet, &domain.name, &config.server.hostname, ip);
-                println!("\n{}", r.text);
-                if r.to_do == 0 {
-                    println!("  lovely — nothing to paste; all sorted. ☕");
-                } else {
-                    println!("  {} to improve · inspect again after DNS settles", r.to_do);
+    }
+}
+
+/// Send one signed proof email from `domain_name`, narrating the result.
+#[cfg(feature = "cli")]
+fn send_test(
+    handle: &tokio::runtime::Handle,
+    theme: &dialoguer::theme::ColorfulTheme,
+    config: &Config,
+    domain_name: &str,
+) {
+    use crate::out::conversation::Outcome;
+    use dialoguer::Input;
+    use mailbourne_core::{EmailAddress, Envelope};
+
+    let to: String = match Input::<String>::with_theme(theme)
+        .with_prompt("send a test to (an inbox you can open)")
+        .interact_text()
+    {
+        Ok(t) => t.trim().to_string(),
+        Err(_) => return,
+    };
+    let from = format!("proof@{domain_name}");
+    let (Ok(to_addr), Ok(from_addr)) = (EmailAddress::parse(&to), EmailAddress::parse(&from))
+    else {
+        println!("  that address doesn't look right — try again.");
+        return;
+    };
+
+    let id = crate::identity::resolve(
+        Some(config),
+        &from_addr,
+        &crate::identity::Overrides::default(),
+    );
+    for note in &id.notes {
+        println!("  · {note}");
+    }
+    let mut message = crate::compose::plain_text(
+        &from_addr,
+        &to_addr,
+        "mailbourne test ☕",
+        "A quick test, sent from mailbourne's console.",
+        &id.hostname,
+    );
+    if let Some(dkim) = &id.dkim {
+        match std::fs::read_to_string(&dkim.key_path) {
+            Ok(pem) => {
+                match crate::out::sign::dkim_sign(&message, &dkim.domain, &dkim.selector, &pem) {
+                    Ok(signed) => {
+                        println!("  DKIM signed ({}) ✓", dkim.selector);
+                        message = signed;
+                    }
+                    Err(e) => {
+                        println!("  ✗ won't send unsigned: {e}");
+                        return;
+                    }
                 }
             }
-            None => println!("  (couldn't find {} in the registry — odd.)", domain.name),
+            Err(e) => {
+                println!("  ✗ couldn't read the key: {e}");
+                return;
+            }
         }
+    }
+
+    let envelope = Envelope {
+        mail_from: from_addr,
+        rcpt_to: vec![to_addr.clone()],
+    };
+    println!("  routing to {} and sending…", to_addr.domain());
+    match handle.block_on(crate::out::send(&id.hostname, &envelope, &message)) {
+        Ok(Outcome::Delivered { reply }) => {
+            println!("  ★ accepted — {} {}", reply.code, reply.lines.join(" "));
+            println!("  open that inbox and check 'show original' for SPF/DKIM/DMARC.");
+        }
+        Ok(Outcome::Deferred { reply, .. }) => {
+            println!("  ⏳ deferred — {} {}", reply.code, reply.lines.join(" "));
+            println!("  \"not now\" — worth another go shortly (greylisting?).");
+        }
+        Ok(Outcome::Rejected { at, reply }) => {
+            println!(
+                "  ✗ rejected at {at:?} — {} {}",
+                reply.code,
+                reply.lines.join(" ")
+            );
+        }
+        Err(e) => println!("  ✗ {e}"),
     }
 }
 

@@ -334,6 +334,47 @@ pub fn render(
     Rendered { text, to_do }
 }
 
+/// The pillar a row belongs to, derived from its shape — so the compact
+/// health view can say "SPF" / "DKIM" / "DMARC" / "MX" without the row
+/// having to carry a label.
+fn label_for(row: &RecordRow) -> &'static str {
+    if row.rtype == "MX" {
+        "MX"
+    } else if row.host.contains("_domainkey") {
+        "DKIM"
+    } else if row.host.starts_with("_dmarc") {
+        "DMARC"
+    } else {
+        "SPF"
+    }
+}
+
+/// Compact one-line-per-record health — the domain screen's at-a-glance
+/// overview. Values live in the full [`render`]; this is just verdicts.
+pub fn render_compact(sheet: &Sheet) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for row in &sheet.rows {
+        let (glyph, note) = match &row.status {
+            RowStatus::AlreadyCorrect => ("✓", "sorted".to_string()),
+            RowStatus::Add => ("⚠", "not published yet".to_string()),
+            RowStatus::Replace { .. } => ("⚠", "needs updating".to_string()),
+            RowStatus::Broken { why } => ("⚠", why.clone()),
+        };
+        let _ = writeln!(out, "   {glyph} {:<6}  {note}", label_for(row));
+    }
+    out
+}
+
+/// How many rows still want action (everything that isn't already correct).
+pub fn count_to_do(sheet: &Sheet) -> usize {
+    sheet
+        .rows
+        .iter()
+        .filter(|r| !matches!(r.status, RowStatus::AlreadyCorrect))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +393,27 @@ mod tests {
                 r.value.starts_with("v=spf1") || matches!(&r.status, RowStatus::Broken { .. })
             })
             .expect("sheet always has an SPF row")
+    }
+
+    #[test]
+    fn compact_health_labels_each_pillar_with_a_verdict() {
+        let sheet = build(
+            "ds.example.com",
+            Mode::Out,
+            Some("s1"),
+            "mail.hq.example.com",
+            &Evidence {
+                domain_txt: vec![format!("v=spf1 ip4:{IP} -all")],
+                server_ip: Some(ip()),
+                ..Default::default()
+            },
+        );
+        let c = render_compact(&sheet);
+        assert!(c.contains("SPF"));
+        assert!(c.contains("✓")); // SPF is already correct
+        assert!(c.contains("DKIM"));
+        assert!(c.contains("⚠")); // DKIM has no key → needs a look
+        assert!(!c.to_lowercase().contains("error"));
     }
 
     #[test]
