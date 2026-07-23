@@ -2,7 +2,8 @@
 //!
 //! Today it carries the Milestone 0 proof tool: `mailbourne send`, which
 //! walks one message through the whole outbound journey and narrates every
-//! step. The full engine (`run`, `inspect`, `dns`, `learn`) arrives next.
+//! step. The full engine (the console, `serve`, `inspect`, `learn`)
+//! arrives next.
 
 use clap::{Parser, Subcommand};
 use mailbourne::out::conversation::Outcome;
