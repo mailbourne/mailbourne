@@ -11,6 +11,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+mailbourne-policy = { path = "../mailbourne-policy", version = "0.0.4" }
 tokio = { version = "1", features = ["io-util"] }
 
 [dev-dependencies]

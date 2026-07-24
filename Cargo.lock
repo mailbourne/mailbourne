@@ -1055,6 +1055,7 @@ dependencies = [
  "mailbourne-core",
  "mailbourne-in",
  "mailbourne-out",
+ "mailbourne-policy",
  "mailbourne-probe",
  "mailbourne-store",
  "tokio",
@@ -1074,6 +1075,7 @@ dependencies = [
 name = "mailbourne-in"
 version = "0.0.4"
 dependencies = [
+ "mailbourne-policy",
  "tokio",
 ]
 
@@ -1099,6 +1101,10 @@ dependencies = [
  "tokio-rustls",
  "webpki-roots 0.26.11",
 ]
+
+[[package]]
+name = "mailbourne-policy"
+version = "0.0.4"
 
 [[package]]
 name = "mailbourne-probe"

@@ -12,6 +12,7 @@
 //! terminates, which is the SMTP-smuggling defense.
 
 use crate::command::{self, SmtpCommand};
+use mailbourne_policy::{Policy, Verdict};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// The most a single command or payload line may be before we refuse it.
@@ -42,7 +43,11 @@ pub struct ReceivedMessage {
 /// # Errors
 /// Propagates socket errors, and treats a connection that drops mid-`DATA`
 /// as an [`std::io::ErrorKind::UnexpectedEof`].
-pub async fn serve<S>(stream: S, our_hostname: &str) -> std::io::Result<Vec<ReceivedMessage>>
+pub async fn serve<S>(
+    stream: S,
+    our_hostname: &str,
+    policy: &dyn Policy,
+) -> std::io::Result<Vec<ReceivedMessage>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -98,8 +103,16 @@ where
                     reply(&mut write, 452, "too many recipients").await?;
                     continue;
                 }
-                rcpts.push(addr);
-                reply(&mut write, 250, "recipient ok").await?;
+                // Acceptance decision: only mail we host (never an open relay).
+                match policy.accept_recipient(&addr) {
+                    Verdict::Accept => {
+                        rcpts.push(addr);
+                        reply(&mut write, 250, "recipient ok").await?;
+                    }
+                    Verdict::Reject(code, msg) => {
+                        reply(&mut write, code, &msg).await?;
+                    }
+                }
             }
             SmtpCommand::Data => {
                 if rcpts.is_empty() {
@@ -239,7 +252,8 @@ mod tests {
     #[tokio::test]
     async fn a_whole_transaction_yields_the_message() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(async move { serve(server, "mail.test").await.unwrap() });
+        let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -271,7 +285,8 @@ mod tests {
     #[tokio::test]
     async fn commands_out_of_order_earn_503() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(async move { serve(server, "mail.test").await.unwrap() });
+        let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -291,9 +306,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_recipient_we_dont_host_is_refused() {
+        // The open-relay defense: we host mail.test, so mail for
+        // somewhere-else.com must be rejected, and nothing gets accepted.
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut r = BufReader::new(cr);
+
+        assert_eq!(code(&mut r).await, 220);
+        send(&mut cw, "EHLO c").await;
+        code(&mut r).await;
+        send(&mut cw, "MAIL FROM:<a@b.com>").await;
+        code(&mut r).await;
+        send(&mut cw, "RCPT TO:<victim@somewhere-else.com>").await;
+        assert_eq!(code(&mut r).await, 550);
+        send(&mut cw, "QUIT").await;
+        assert_eq!(code(&mut r).await, 221);
+        drop(cw);
+        drop(r);
+        assert!(task.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn the_null_sender_is_accepted_for_bounces() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(async move { serve(server, "mail.test").await.unwrap() });
+        let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -318,7 +358,8 @@ mod tests {
     #[tokio::test]
     async fn dot_stuffing_is_reversed_in_the_body() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(async move { serve(server, "mail.test").await.unwrap() });
+        let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -346,7 +387,8 @@ mod tests {
     #[tokio::test]
     async fn one_session_can_carry_two_messages() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(async move { serve(server, "mail.test").await.unwrap() });
+        let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 

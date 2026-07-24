@@ -5,35 +5,52 @@
 //! ([`mailbourne_store`]). This is the daemon face of the engine —
 //! `mailbourne serve`, and the docker image's default command.
 //!
-//! For now it accepts every recipient and stores to Maildir; recipient
-//! validation, the policy pipeline, and richer routing arrive with the next
-//! milestones.
+//! Recipients are validated by the [`mailbourne_policy`] layer — only mail
+//! for domains we host is accepted (never an open relay). The wider policy
+//! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) and richer routing (spool
+//! + delivery worker → store / forward / webhook / queue) arrive next.
 
+use mailbourne_policy::Policy;
 use mailbourne_store::Maildir;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
 /// Binds `addr` and serves forever — one spawned task per connection.
 ///
+/// `policy` decides which recipients to accept (never an open relay);
+/// `store` is where accepted mail lands.
+///
 /// # Errors
 /// Fails if the address can't be bound (e.g. port 25 needs privilege, or is
 /// already in use).
-pub async fn run(addr: SocketAddr, hostname: String, store: Maildir) -> std::io::Result<()> {
+pub async fn run(
+    addr: SocketAddr,
+    hostname: String,
+    policy: Arc<dyn Policy>,
+    store: Maildir,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     loop {
         let (stream, _peer) = listener.accept().await?;
         let hostname = hostname.clone();
+        let policy = policy.clone();
         let store = store.clone();
         tokio::spawn(async move {
-            handle_connection(stream, &hostname, &store).await;
+            handle_connection(stream, &hostname, policy.as_ref(), &store).await;
         });
     }
 }
 
 /// Handles one connection: run the SMTP session, then deliver each accepted
 /// message into each recipient's mailbox.
-async fn handle_connection(stream: tokio::net::TcpStream, hostname: &str, store: &Maildir) {
-    let messages = match mailbourne_in::session::serve(stream, hostname).await {
+async fn handle_connection(
+    stream: tokio::net::TcpStream,
+    hostname: &str,
+    policy: &dyn Policy,
+    store: &Maildir,
+) {
+    let messages = match mailbourne_in::session::serve(stream, hostname, policy).await {
         Ok(messages) => messages,
         Err(_) => return,
     };
@@ -71,7 +88,8 @@ mod tests {
         let store_for_server = store.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_connection(stream, "mail.test", &store_for_server).await;
+            let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+            handle_connection(stream, "mail.test", &policy, &store_for_server).await;
         });
 
         let envelope = Envelope {

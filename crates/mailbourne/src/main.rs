@@ -477,17 +477,38 @@ async fn serve_cmd(
     };
     let store = mailbourne::store::Maildir::at(store_path);
 
+    // Receive only for domains registered in / both — never an open relay.
+    let hosted: Vec<String> = config
+        .domains
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.mode,
+                mailbourne::config::Mode::In | mailbourne::config::Mode::Both
+            )
+        })
+        .map(|d| d.name.clone())
+        .collect();
+    let policy: std::sync::Arc<dyn mailbourne::policy::Policy> =
+        std::sync::Arc::new(mailbourne::policy::HostedDomains::new(hosted.clone()));
+
     println!(
         "☕ mailbourne — serving {} on {addr}",
         config.server.hostname
     );
     println!("   received mail → {}", store_path.display());
+    if hosted.is_empty() {
+        println!("   ⚠ no domains registered to receive (mode in/both) — every recipient");
+        println!("     will be refused. add one: mailbourne domain add <name>");
+    } else {
+        println!("   receiving for: {}", hosted.join(", "));
+    }
     if port == 25 {
         println!(
             "   (port 25 needs privilege — run with sudo or a cap, or use --port 2525 to try it)"
         );
     }
-    match mailbourne::serve::run(addr, config.server.hostname.clone(), store).await {
+    match mailbourne::serve::run(addr, config.server.hostname.clone(), policy, store).await {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("✗ couldn't serve on {addr}: {e}");

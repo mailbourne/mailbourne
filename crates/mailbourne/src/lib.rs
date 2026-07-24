@@ -25,6 +25,7 @@ pub use mailbourne_core::config;
 pub use mailbourne_core::{EmailAddress, Envelope, MailEvent, Message};
 pub use mailbourne_in as inbound;
 pub use mailbourne_out as out;
+pub use mailbourne_policy as policy;
 pub use mailbourne_probe as probe;
 pub use mailbourne_store as store;
 

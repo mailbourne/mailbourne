@@ -1,0 +1,11 @@
+[package]
+name = "mailbourne-policy"
+description = "The decision layer: accept, defer, or reject — publicly a policy engine, internally a cyber-defense team"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

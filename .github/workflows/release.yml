@@ -161,6 +161,7 @@ jobs:
           cargo publish -p mailbourne-probe --allow-dirty
           cargo publish -p mailbourne-inspect --allow-dirty
           cargo publish -p mailbourne-out --allow-dirty
+          cargo publish -p mailbourne-policy --allow-dirty
           cargo publish -p mailbourne-in --allow-dirty
           cargo publish -p mailbourne-store --allow-dirty
           cargo publish -p mailbourne --allow-dirty
