@@ -1071,6 +1071,9 @@ dependencies = [
 [[package]]
 name = "mailbourne-in"
 version = "0.0.4"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "mailbourne-inspect"
