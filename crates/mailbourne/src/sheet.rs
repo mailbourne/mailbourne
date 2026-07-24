@@ -349,19 +349,45 @@ fn label_for(row: &RecordRow) -> &'static str {
     }
 }
 
-/// Compact one-line-per-record health — the domain screen's at-a-glance
-/// overview. Values live in the full [`render`]; this is just verdicts.
-pub fn render_compact(sheet: &Sheet) -> String {
+/// Health with paste content inline — a verdict per pillar, and for anything
+/// that needs work, the exact record to publish *right there*. No
+/// back-and-forth to a separate records screen: you see what's wrong and
+/// what to paste in one place. Correct rows stay a single tidy line.
+pub fn render_health(sheet: &Sheet) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     for row in &sheet.rows {
-        let (glyph, note) = match &row.status {
-            RowStatus::AlreadyCorrect => ("✓", "sorted".to_string()),
-            RowStatus::Add => ("⚠", "not published yet".to_string()),
-            RowStatus::Replace { .. } => ("⚠", "needs updating".to_string()),
-            RowStatus::Broken { why } => ("⚠", why.clone()),
-        };
-        let _ = writeln!(out, "   {glyph} {:<6}  {note}", label_for(row));
+        match &row.status {
+            RowStatus::AlreadyCorrect => {
+                let _ = writeln!(out, "   ✓ {:<6}  sorted", label_for(row));
+            }
+            RowStatus::Add => {
+                let _ = writeln!(
+                    out,
+                    "   ⚠ {:<6}  not published yet — paste this:",
+                    label_for(row)
+                );
+                let _ = writeln!(out, "        {}   {}   {}", row.host, row.rtype, row.value);
+            }
+            RowStatus::Replace { current } => {
+                let _ = writeln!(
+                    out,
+                    "   ⚠ {:<6}  needs updating — replace with:",
+                    label_for(row)
+                );
+                let _ = writeln!(out, "        {}   {}   {}", row.host, row.rtype, row.value);
+                let _ = writeln!(out, "        (currently: {current})");
+            }
+            RowStatus::Broken { why } => {
+                let _ = writeln!(out, "   ⚠ {:<6}  {why}", label_for(row));
+                if !row.value.is_empty() {
+                    let _ = writeln!(out, "        {}   {}   {}", row.host, row.rtype, row.value);
+                }
+            }
+        }
+    }
+    for note in &sheet.notes {
+        let _ = writeln!(out, "   · {note}");
     }
     out
 }
@@ -396,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_health_labels_each_pillar_with_a_verdict() {
+    fn health_shows_verdicts_and_inline_paste_content() {
         let sheet = build(
             "ds.example.com",
             Mode::Out,
@@ -408,11 +434,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let c = render_compact(&sheet);
+        let c = render_health(&sheet);
         assert!(c.contains("SPF"));
-        assert!(c.contains("✓")); // SPF is already correct
-        assert!(c.contains("DKIM"));
-        assert!(c.contains("⚠")); // DKIM has no key → needs a look
+        assert!(c.contains("DMARC"));
+        assert!(c.contains("_dmarc.ds.example.com"));
+        assert!(c.contains("v=DMARC1"));
         assert!(!c.to_lowercase().contains("error"));
     }
 

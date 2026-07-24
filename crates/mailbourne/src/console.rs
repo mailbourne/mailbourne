@@ -211,8 +211,8 @@ fn domain_screen(
         println!("   mail via {}", config.server.hostname);
         match &cached {
             Some((sheet, _)) => {
-                println!("\n   HEALTH");
-                print!("{}", crate::sheet::render_compact(sheet));
+                println!("\n   HEALTH   (paste anything marked ⚠ at your DNS provider)");
+                print!("{}", crate::sheet::render_health(sheet));
                 let to_do = crate::sheet::count_to_do(sheet);
                 println!("\n   {}", encouragement(Some(to_do)));
             }
@@ -221,7 +221,6 @@ fn domain_screen(
 
         let labels = [
             "re-check live",
-            "show records to publish",
             "send a test email",
             "rotate the DKIM key",
             "change mode",
@@ -244,29 +243,17 @@ fn domain_screen(
                 );
                 cached = handle.block_on(crate::inspect::domain(config, &domain.name));
             }
-            1 => match &cached {
-                Some((sheet, ip)) => {
-                    let r = crate::sheet::render(sheet, &domain.name, &config.server.hostname, *ip);
-                    println!("\n{}", r.text);
-                    if r.to_do == 0 {
-                        println!("  nothing to paste — all sorted. ☕");
-                    } else {
-                        println!("  {} to improve · paste, then 're-check'", r.to_do);
-                    }
-                }
-                None => println!("  re-check first — I couldn't reach DNS."),
-            },
-            2 => send_test(handle, theme, config, &domain.name),
-            3 => {
+            1 => send_test(handle, theme, config, &domain.name),
+            2 => {
                 println!("\n  rotating a DKIM key — coming soon.");
                 println!("  it'll mint a fresh key under a new selector and keep the old");
                 println!("  one valid until you've published the new record. no downtime.");
             }
-            4 => {
+            3 => {
                 println!("\n  changing mode — coming soon (needs safe config editing).");
                 println!("  for now, edit the `mode` line in your mailbourne.toml by hand.");
             }
-            5 => {
+            4 => {
                 println!("\n  removing a domain — coming soon (needs safe config editing).");
                 println!("  for now, delete its [[domain]] block from mailbourne.toml.");
             }
