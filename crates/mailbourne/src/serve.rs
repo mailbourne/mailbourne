@@ -1,29 +1,63 @@
 //! # serve — run mailbourne as a receiving server
 //!
 //! Binds a listener and, for each connection, runs the server-side SMTP
-//! session ([`mailbourne_in`]) and delivers accepted messages to the store
-//! ([`mailbourne_store`]). This is the daemon face of the engine —
-//! `mailbourne serve`, and the docker image's default command.
+//! session ([`mailbourne_in`]). An accepted message is written to the durable
+//! [`Spool`] **before** the session answers `250` — so a crash after `250`
+//! loses nothing — and a background [`worker`](crate::worker) drains the spool
+//! to the delivery targets, retrying failures with backoff. This is the daemon
+//! face of the engine — `mailbourne serve`, and the docker image's default
+//! command.
 //!
 //! Recipients are validated by the [`mailbourne_policy`] layer — only mail
 //! for domains we host is accepted (never an open relay). The wider policy
-//! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) and richer routing (spool
-//! + delivery worker → store / forward / webhook / queue) arrive next.
+//! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) arrives next.
 
 use crate::route::DeliveryTarget;
+use async_trait::async_trait;
+use mailbourne_in::session::{Commit, ReceivedMessage};
+use mailbourne_out::retry::Policy as RetryPolicy;
 use mailbourne_policy::Policy;
+use mailbourne_spool::Spool;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-/// Every accepted message goes to each of these, in order.
+/// Every accepted message is spooled for each of these, by name.
 pub type Targets = Arc<Vec<Arc<dyn DeliveryTarget>>>;
 
-/// Binds `addr` and serves forever — one spawned task per connection.
+/// The durable seam between accepting a message and delivering it: the SMTP
+/// session commits each message to the spool (recording which targets it's
+/// due for) before answering `250`. Delivery itself is the worker's job.
+struct SpoolCommit {
+    spool: Spool,
+    target_names: Vec<String>,
+}
+
+#[async_trait]
+impl Commit for SpoolCommit {
+    async fn commit(&self, message: &ReceivedMessage) -> Result<(), String> {
+        self.spool
+            .enqueue(
+                &message.mail_from,
+                &message.rcpt_to,
+                &message.data,
+                &self.target_names,
+                crate::worker::now_unix(),
+            )
+            .await
+            .map(|_id| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Binds `addr` and serves forever — one spawned task per connection — while
+/// a background worker delivers spooled mail to `targets`.
 ///
 /// `policy` decides which recipients to accept (never an open relay);
-/// `targets` are where accepted mail is routed (a mailbox store, a channel
-/// into an embedding app, and — later — forward / webhook / queue).
+/// `targets` are where accepted mail is routed (a mailbox store, a channel or
+/// function into an embedding app, and — later — forward / webhook / queue);
+/// `spool_dir` is where accepted-but-not-yet-delivered mail lives on disk.
 ///
 /// # Errors
 /// Fails if the address can't be bound (e.g. port 25 needs privilege, or is
@@ -33,42 +67,45 @@ pub async fn run(
     hostname: String,
     policy: Arc<dyn Policy>,
     targets: Targets,
+    spool_dir: PathBuf,
 ) -> std::io::Result<()> {
+    let spool = Spool::at(spool_dir);
+    let target_names: Vec<String> = targets.iter().map(|t| t.name().to_string()).collect();
+
+    // The delivery worker runs alongside the acceptor: it drains the spool to
+    // the targets and reschedules failures. Bind first so a bind error is
+    // reported before we spawn anything.
     let listener = TcpListener::bind(addr).await?;
+    tokio::spawn(crate::worker::run(
+        spool.clone(),
+        targets.clone(),
+        RetryPolicy::default(),
+    ));
+
     loop {
         let (stream, _peer) = listener.accept().await?;
         let hostname = hostname.clone();
         let policy = policy.clone();
-        let targets = targets.clone();
+        let commit = SpoolCommit {
+            spool: spool.clone(),
+            target_names: target_names.clone(),
+        };
         tokio::spawn(async move {
-            handle_connection(stream, &hostname, policy.as_ref(), &targets).await;
+            handle_connection(stream, &hostname, policy.as_ref(), &commit).await;
         });
     }
 }
 
-/// Handles one connection: run the SMTP session, then route each accepted
-/// message to every target.
-///
-/// (For now this is synchronous — accept then deliver. The durable
-/// spool + async delivery worker, which lets a slow or failing target retry
-/// without stalling or losing mail, is the next step.)
+/// Handles one connection: run the SMTP session, committing each accepted
+/// message to the spool (via `commit`) before the `250`. Delivery is the
+/// worker's job, not this task's.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     hostname: &str,
     policy: &dyn Policy,
-    targets: &[Arc<dyn DeliveryTarget>],
+    commit: &dyn Commit,
 ) {
-    let messages = match mailbourne_in::session::serve(stream, hostname, policy).await {
-        Ok(messages) => messages,
-        Err(_) => return,
-    };
-    for message in messages {
-        for target in targets {
-            // A failure at one target shouldn't lose the others; real error
-            // surfacing and retry come with the delivery worker.
-            let _ = target.deliver(&message).await;
-        }
-    }
+    let _ = mailbourne_in::session::serve(stream, hostname, policy, commit).await;
 }
 
 #[cfg(test)]
@@ -79,15 +116,30 @@ mod tests {
     use mailbourne_core::{EmailAddress, Envelope, Message};
     use mailbourne_store::Maildir;
 
-    /// Sends one message from our outbound engine to a one-shot listener
-    /// wired with `targets`, and returns after it's handled.
+    /// Sends one message from our outbound engine to a one-shot listener,
+    /// which commits it to a fresh spool; then ticks the worker once so the
+    /// message reaches `targets`. Proves the whole accept → spool → deliver
+    /// path, not just an in-memory hop.
     async fn deliver_to_targets(targets: Vec<Arc<dyn DeliveryTarget>>) {
+        let spool_dir = std::env::temp_dir().join(format!(
+            "mb-serve-spool-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let spool = Spool::at(&spool_dir);
+        let commit = SpoolCommit {
+            spool: spool.clone(),
+            target_names: targets.iter().map(|t| t.name().to_string()).collect(),
+        };
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
-            handle_connection(stream, "mail.test", &policy, &targets).await;
+            handle_connection(stream, "mail.test", &policy, &commit).await;
         });
 
         let envelope = Envelope {
@@ -107,6 +159,17 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, Outcome::Delivered { .. }));
         server.await.unwrap();
+
+        // The session has spooled the message; now the worker delivers it.
+        crate::worker::tick(
+            &spool,
+            &targets,
+            crate::worker::now_unix(),
+            &RetryPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&spool_dir);
     }
 
     #[tokio::test]

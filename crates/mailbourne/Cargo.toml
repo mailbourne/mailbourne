@@ -28,9 +28,10 @@ mailbourne-out = { path = "../mailbourne-out", version = "0.0.4" }
 mailbourne-in = { path = "../mailbourne-in", version = "0.0.4" }
 mailbourne-policy = { path = "../mailbourne-policy", version = "0.0.4" }
 mailbourne-store = { path = "../mailbourne-store", version = "0.0.4" }
+mailbourne-spool = { path = "../mailbourne-spool", version = "0.0.4" }
 mailbourne-probe = { path = "../mailbourne-probe", version = "0.0.4" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"], optional = true }
 dialoguer = { version = "0.11", optional = true }
-tokio = { version = "1", features = ["rt", "net", "sync"] }
+tokio = { version = "1", features = ["rt", "net", "sync", "time"] }
 async-trait = "0.1"

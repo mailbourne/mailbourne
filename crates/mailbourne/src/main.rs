@@ -516,7 +516,20 @@ async fn serve_cmd(
             "   (port 25 needs privilege — run with sudo or a cap, or use --port 2525 to try it)"
         );
     }
-    match mailbourne::serve::run(addr, config.server.hostname.clone(), policy, targets).await {
+    // Accepted-but-not-yet-delivered mail lives in a spool beside the maildir.
+    let spool_dir = store_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("spool");
+    match mailbourne::serve::run(
+        addr,
+        config.server.hostname.clone(),
+        policy,
+        targets,
+        spool_dir,
+    )
+    .await
+    {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("✗ couldn't serve on {addr}: {e}");

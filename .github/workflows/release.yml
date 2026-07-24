@@ -164,6 +164,7 @@ jobs:
           cargo publish -p mailbourne-policy --allow-dirty
           cargo publish -p mailbourne-in --allow-dirty
           cargo publish -p mailbourne-store --allow-dirty
+          cargo publish -p mailbourne-spool --allow-dirty
           cargo publish -p mailbourne --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

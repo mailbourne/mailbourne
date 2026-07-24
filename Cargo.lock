@@ -1058,6 +1058,7 @@ dependencies = [
  "mailbourne-out",
  "mailbourne-policy",
  "mailbourne-probe",
+ "mailbourne-spool",
  "mailbourne-store",
  "tokio",
 ]
@@ -1076,6 +1077,7 @@ dependencies = [
 name = "mailbourne-in"
 version = "0.0.4"
 dependencies = [
+ "async-trait",
  "mailbourne-policy",
  "tokio",
 ]
@@ -1112,6 +1114,16 @@ name = "mailbourne-probe"
 version = "0.0.4"
 dependencies = [
  "hickory-resolver 0.24.4",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "mailbourne-spool"
+version = "0.0.4"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
  "tokio",
 ]

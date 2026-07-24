@@ -12,6 +12,7 @@
 //! terminates, which is the SMTP-smuggling defense.
 
 use crate::command::{self, SmtpCommand};
+use async_trait::async_trait;
 use mailbourne_policy::{Policy, Verdict};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -37,8 +38,28 @@ pub struct ReceivedMessage {
     pub data: Vec<u8>,
 }
 
+/// A durable sink for an accepted message.
+///
+/// The session calls [`commit`](Commit::commit) at the moment a message's
+/// DATA ends — **before** it answers `250`. Returning `Ok` means the message
+/// is safely persisted (the caller may now be told it's accepted); returning
+/// `Err` makes the session answer `451` instead, so the sender retries rather
+/// than believe we took mail we then dropped. This is mailbourne's
+/// never-lose-accepted-mail contract, enforced at the wire.
+#[async_trait]
+pub trait Commit: Send + Sync {
+    /// Durably record one accepted message. `Ok` → the session answers
+    /// `250`; `Err(reason)` → it answers `451` (temporary).
+    async fn commit(&self, message: &ReceivedMessage) -> Result<(), String>;
+}
+
 /// Runs one SMTP session as the server, returning every message accepted
 /// before the connection ended.
+///
+/// Each message is handed to `commit` before the `250` reply — a failed
+/// commit yields `451`, never a false acceptance. The returned `Vec` is a
+/// convenience for in-process callers and tests; durability rides on
+/// `commit`, not on the return value.
 ///
 /// # Errors
 /// Propagates socket errors, and treats a connection that drops mid-`DATA`
@@ -47,6 +68,7 @@ pub async fn serve<S>(
     stream: S,
     our_hostname: &str,
     policy: &dyn Policy,
+    commit: &dyn Commit,
 ) -> std::io::Result<Vec<ReceivedMessage>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -122,12 +144,23 @@ where
                 reply(&mut write, 354, "go ahead; end with <CRLF>.<CRLF>").await?;
                 match read_payload(&mut reader).await? {
                     Some(data) => {
-                        messages.push(ReceivedMessage {
+                        let message = ReceivedMessage {
                             mail_from: mail_from.take().unwrap_or_default(),
                             rcpt_to: std::mem::take(&mut rcpts),
                             data,
-                        });
-                        reply(&mut write, 250, "message accepted for delivery").await?;
+                        };
+                        // Durably record BEFORE promising acceptance. If the
+                        // sink can't take it, we say 451 (try again) — never a
+                        // 250 for mail we didn't persist.
+                        match commit.commit(&message).await {
+                            Ok(()) => {
+                                messages.push(message);
+                                reply(&mut write, 250, "message accepted for delivery").await?;
+                            }
+                            Err(_) => {
+                                reply(&mut write, 451, "temporary local error; try again").await?;
+                            }
+                        }
                     }
                     None => {
                         mail_from = None;
@@ -230,6 +263,24 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncWriteExt, BufReader};
 
+    /// A commit that always accepts — for tests about SMTP flow, not durability.
+    struct AcceptAll;
+    #[async_trait]
+    impl Commit for AcceptAll {
+        async fn commit(&self, _message: &ReceivedMessage) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A commit that always refuses — to prove a failed persist becomes `451`.
+    struct RejectAll;
+    #[async_trait]
+    impl Commit for RejectAll {
+        async fn commit(&self, _message: &ReceivedMessage) -> Result<(), String> {
+            Err("disk full".to_string())
+        }
+    }
+
     /// Reads one (possibly multiline) reply and returns its code.
     async fn code<R: AsyncBufRead + Unpin>(r: &mut R) -> u16 {
         loop {
@@ -253,7 +304,11 @@ mod tests {
     async fn a_whole_transaction_yields_the_message() {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
-        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
+        let task = tokio::spawn(async move {
+            serve(server, "mail.test", &policy, &AcceptAll)
+                .await
+                .unwrap()
+        });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -283,10 +338,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_commit_answers_451_not_250() {
+        // The never-lose contract at the wire: if the durable sink refuses
+        // the message, the client must hear 451 (retry later), never a 250.
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move {
+            serve(server, "mail.test", &policy, &RejectAll)
+                .await
+                .unwrap()
+        });
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut r = BufReader::new(cr);
+
+        assert_eq!(code(&mut r).await, 220);
+        send(&mut cw, "EHLO c").await;
+        code(&mut r).await;
+        send(&mut cw, "MAIL FROM:<a@b.com>").await;
+        code(&mut r).await;
+        send(&mut cw, "RCPT TO:<bob@mail.test>").await;
+        code(&mut r).await;
+        send(&mut cw, "DATA").await;
+        code(&mut r).await;
+        cw.write_all(b"body\r\n.\r\n").await.unwrap();
+        cw.flush().await.unwrap();
+        assert_eq!(code(&mut r).await, 451, "a failed commit must not be a 250");
+        send(&mut cw, "QUIT").await;
+        assert_eq!(code(&mut r).await, 221);
+        drop(cw);
+        drop(r);
+        // And nothing is reported as accepted.
+        assert!(task.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn commands_out_of_order_earn_503() {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
-        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
+        let task = tokio::spawn(async move {
+            serve(server, "mail.test", &policy, &AcceptAll)
+                .await
+                .unwrap()
+        });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -311,7 +404,11 @@ mod tests {
         // somewhere-else.com must be rejected, and nothing gets accepted.
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
-        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
+        let task = tokio::spawn(async move {
+            serve(server, "mail.test", &policy, &AcceptAll)
+                .await
+                .unwrap()
+        });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -333,7 +430,11 @@ mod tests {
     async fn the_null_sender_is_accepted_for_bounces() {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
-        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
+        let task = tokio::spawn(async move {
+            serve(server, "mail.test", &policy, &AcceptAll)
+                .await
+                .unwrap()
+        });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -359,7 +460,11 @@ mod tests {
     async fn dot_stuffing_is_reversed_in_the_body() {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
-        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
+        let task = tokio::spawn(async move {
+            serve(server, "mail.test", &policy, &AcceptAll)
+                .await
+                .unwrap()
+        });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 
@@ -388,7 +493,11 @@ mod tests {
     async fn one_session_can_carry_two_messages() {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
-        let task = tokio::spawn(async move { serve(server, "mail.test", &policy).await.unwrap() });
+        let task = tokio::spawn(async move {
+            serve(server, "mail.test", &policy, &AcceptAll)
+                .await
+                .unwrap()
+        });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
 

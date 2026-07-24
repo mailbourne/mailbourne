@@ -21,6 +21,7 @@ pub mod inspect;
 pub mod route;
 pub mod serve;
 pub mod sheet;
+pub mod worker;
 
 pub use mailbourne_core::config;
 pub use mailbourne_core::{EmailAddress, Envelope, MailEvent, Message};
