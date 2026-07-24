@@ -492,6 +492,14 @@ async fn serve_cmd(
     let policy: std::sync::Arc<dyn mailbourne::policy::Policy> =
         std::sync::Arc::new(mailbourne::policy::HostedDomains::new(hosted.clone()));
 
+    // For now, one target: the mailbox store. Forward / webhook / queue join
+    // this list as routing grows.
+    let targets: mailbourne::serve::Targets =
+        std::sync::Arc::new(vec![
+            std::sync::Arc::new(mailbourne::route::MailboxTarget::new(store))
+                as std::sync::Arc<dyn mailbourne::route::DeliveryTarget>,
+        ]);
+
     println!(
         "☕ mailbourne — serving {} on {addr}",
         config.server.hostname
@@ -508,7 +516,7 @@ async fn serve_cmd(
             "   (port 25 needs privilege — run with sudo or a cap, or use --port 2525 to try it)"
         );
     }
-    match mailbourne::serve::run(addr, config.server.hostname.clone(), policy, store).await {
+    match mailbourne::serve::run(addr, config.server.hostname.clone(), policy, targets).await {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("✗ couldn't serve on {addr}: {e}");

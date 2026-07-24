@@ -18,6 +18,7 @@ pub mod compose;
 pub mod console;
 pub mod identity;
 pub mod inspect;
+pub mod route;
 pub mod serve;
 pub mod sheet;
 

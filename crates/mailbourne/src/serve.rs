@@ -10,16 +10,20 @@
 //! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) and richer routing (spool
 //! + delivery worker → store / forward / webhook / queue) arrive next.
 
+use crate::route::DeliveryTarget;
 use mailbourne_policy::Policy;
-use mailbourne_store::Maildir;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
+/// Every accepted message goes to each of these, in order.
+pub type Targets = Arc<Vec<Arc<dyn DeliveryTarget>>>;
+
 /// Binds `addr` and serves forever — one spawned task per connection.
 ///
 /// `policy` decides which recipients to accept (never an open relay);
-/// `store` is where accepted mail lands.
+/// `targets` are where accepted mail is routed (a mailbox store, a channel
+/// into an embedding app, and — later — forward / webhook / queue).
 ///
 /// # Errors
 /// Fails if the address can't be bound (e.g. port 25 needs privilege, or is
@@ -28,37 +32,41 @@ pub async fn run(
     addr: SocketAddr,
     hostname: String,
     policy: Arc<dyn Policy>,
-    store: Maildir,
+    targets: Targets,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     loop {
         let (stream, _peer) = listener.accept().await?;
         let hostname = hostname.clone();
         let policy = policy.clone();
-        let store = store.clone();
+        let targets = targets.clone();
         tokio::spawn(async move {
-            handle_connection(stream, &hostname, policy.as_ref(), &store).await;
+            handle_connection(stream, &hostname, policy.as_ref(), &targets).await;
         });
     }
 }
 
-/// Handles one connection: run the SMTP session, then deliver each accepted
-/// message into each recipient's mailbox.
+/// Handles one connection: run the SMTP session, then route each accepted
+/// message to every target.
+///
+/// (For now this is synchronous — accept then deliver. The durable
+/// spool + async delivery worker, which lets a slow or failing target retry
+/// without stalling or losing mail, is the next step.)
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     hostname: &str,
     policy: &dyn Policy,
-    store: &Maildir,
+    targets: &[Arc<dyn DeliveryTarget>],
 ) {
     let messages = match mailbourne_in::session::serve(stream, hostname, policy).await {
         Ok(messages) => messages,
         Err(_) => return,
     };
-    for msg in messages {
-        for rcpt in &msg.rcpt_to {
-            // A store failure for one recipient shouldn't lose the others;
-            // real error surfacing comes with the log narrator.
-            let _ = store.store(rcpt, &msg.data).await;
+    for message in messages {
+        for target in targets {
+            // A failure at one target shouldn't lose the others; real error
+            // surfacing and retry come with the delivery worker.
+            let _ = target.deliver(&message).await;
         }
     }
 }
@@ -67,29 +75,19 @@ async fn handle_connection(
 mod tests {
     use super::*;
     use crate::out::conversation::Outcome;
+    use crate::route::{ChannelTarget, MailboxTarget};
     use mailbourne_core::{EmailAddress, Envelope, Message};
+    use mailbourne_store::Maildir;
 
-    #[tokio::test]
-    async fn a_message_sent_to_our_listener_is_stored() {
-        // The whole loop, our own halves talking to each other: our
-        // OUTBOUND engine sends to our INBOUND listener, which stores it.
-        let root = std::env::temp_dir().join(format!(
-            "mb-serve-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = Maildir::at(&root);
-
+    /// Sends one message from our outbound engine to a one-shot listener
+    /// wired with `targets`, and returns after it's handled.
+    async fn deliver_to_targets(targets: Vec<Arc<dyn DeliveryTarget>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-
-        let store_for_server = store.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
-            handle_connection(stream, "mail.test", &policy, &store_for_server).await;
+            handle_connection(stream, "mail.test", &policy, &targets).await;
         });
 
         let envelope = Envelope {
@@ -98,7 +96,6 @@ mod tests {
         };
         let message =
             Message::from_raw(b"Subject: loopback\r\n\r\nhi from the future\r\n".to_vec());
-
         let outcome = crate::out::send_to_host(
             &addr.ip().to_string(),
             addr.port(),
@@ -109,18 +106,43 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(outcome, Outcome::Delivered { .. }));
-
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_message_routes_to_the_mailbox_target() {
+        // Our OUTBOUND engine sends to our INBOUND listener, which routes to
+        // a Maildir target — both halves of mailbourne, proven end to end.
+        let root = std::env::temp_dir().join(format!(
+            "mb-serve-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Maildir::at(&root);
+        deliver_to_targets(vec![Arc::new(MailboxTarget::new(store))]).await;
 
         let new_dir = root.join("bob@mail.test").join("new");
         let files: Vec<_> = std::fs::read_dir(&new_dir).unwrap().flatten().collect();
-        assert_eq!(files.len(), 1, "exactly one message should be stored");
+        assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(files[0].path()).unwrap();
-        assert!(
-            content.contains("hi from the future"),
-            "body should be intact"
-        );
-
+        assert!(content.contains("hi from the future"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_message_routes_to_an_embedding_channel() {
+        // The embedding seam: a downstream app (zebflow-style) receives the
+        // message on a channel and can do whatever it likes with it.
+        let (target, mut rx) = ChannelTarget::new(8);
+        deliver_to_targets(vec![Arc::new(target)]).await;
+
+        let received = rx
+            .recv()
+            .await
+            .expect("a message should arrive on the channel");
+        assert_eq!(received.rcpt_to, vec!["bob@mail.test".to_string()]);
+        assert!(String::from_utf8_lossy(&received.data).contains("hi from the future"));
     }
 }

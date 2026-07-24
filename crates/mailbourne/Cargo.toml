@@ -32,4 +32,5 @@ mailbourne-probe = { path = "../mailbourne-probe", version = "0.0.4" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"], optional = true }
 dialoguer = { version = "0.11", optional = true }
-tokio = { version = "1", features = ["rt", "net"] }
+tokio = { version = "1", features = ["rt", "net", "sync"] }
+async-trait = "0.1"
