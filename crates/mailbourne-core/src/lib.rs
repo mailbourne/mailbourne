@@ -17,6 +17,7 @@
 
 pub mod address;
 pub mod config;
+pub mod edit;
 pub mod envelope;
 pub mod event;
 pub mod message;

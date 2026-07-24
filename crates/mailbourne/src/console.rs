@@ -168,7 +168,12 @@ pub fn run(handle: &tokio::runtime::Handle, config_path: Option<std::path::PathB
         };
         match home_choice(statuses.len(), sel) {
             HomeChoice::Domain(i) => {
-                domain_screen(handle, &theme, &config, i);
+                let changed = domain_screen(handle, &theme, &config, &path, i);
+                if changed {
+                    if let Ok(fresh) = Config::load(&path) {
+                        config = fresh;
+                    }
+                }
                 statuses = handle.block_on(gather_home_status(&config));
             }
             HomeChoice::Add => {
@@ -192,13 +197,16 @@ pub fn run(handle: &tokio::runtime::Handle, config_path: Option<std::path::PathB
     }
 }
 
+/// Drives one domain's screen. Returns `true` if it changed the config
+/// (so home reloads).
 #[cfg(feature = "cli")]
 fn domain_screen(
     handle: &tokio::runtime::Handle,
     theme: &dialoguer::theme::ColorfulTheme,
     config: &Config,
+    config_path: &std::path::Path,
     idx: usize,
-) {
+) -> bool {
     use dialoguer::Select;
     let domain = &config.domains[idx];
 
@@ -233,7 +241,7 @@ fn domain_screen(
             .interact_opt()
         {
             Ok(Some(i)) => i,
-            _ => return,
+            _ => return false,
         };
         match sel {
             0 => {
@@ -245,19 +253,195 @@ fn domain_screen(
             }
             1 => send_test(handle, theme, config, &domain.name),
             2 => {
-                println!("\n  rotating a DKIM key — coming soon.");
-                println!("  it'll mint a fresh key under a new selector and keep the old");
-                println!("  one valid until you've published the new record. no downtime.");
+                if rekey_domain(theme, config_path, domain) {
+                    return true;
+                }
             }
             3 => {
-                println!("\n  changing mode — coming soon (needs safe config editing).");
-                println!("  for now, edit the `mode` line in your mailbourne.toml by hand.");
+                if change_mode(theme, config_path, &domain.name) {
+                    return true;
+                }
             }
             4 => {
-                println!("\n  removing a domain — coming soon (needs safe config editing).");
-                println!("  for now, delete its [[domain]] block from mailbourne.toml.");
+                if remove_domain_flow(theme, config_path, &domain.name) {
+                    return true;
+                }
             }
-            _ => return,
+            _ => return false,
+        }
+    }
+}
+
+/// Rotate a domain's DKIM key under a fresh selector.
+#[cfg(feature = "cli")]
+fn rekey_domain(
+    theme: &dialoguer::theme::ColorfulTheme,
+    config_path: &std::path::Path,
+    domain: &mailbourne_core::config::DomainConfig,
+) -> bool {
+    use dialoguer::Input;
+
+    let old_selector = domain.dkim_selector.clone().unwrap_or_default();
+    let suggested = if old_selector.is_empty() {
+        "mb2026".to_string()
+    } else {
+        format!("{old_selector}b")
+    };
+    let new_selector: String = match Input::<String>::with_theme(theme)
+        .with_prompt(format!("new selector (must differ from '{old_selector}')"))
+        .default(suggested)
+        .interact_text()
+    {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return false,
+    };
+    if new_selector.is_empty() || new_selector == old_selector {
+        println!("  pick a selector that's different from the old one.");
+        return false;
+    }
+
+    let pair = match crate::out::sign::generate_dkim_keypair() {
+        Ok(p) => p,
+        Err(e) => {
+            println!("  ✗ couldn't mint a key: {e}");
+            return false;
+        }
+    };
+
+    let keydir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("keys");
+    let _ = std::fs::create_dir_all(&keydir);
+    let keyfile = keydir.join(format!("{}.pem", domain.name));
+    if std::fs::write(&keyfile, &pair.private_key_pem).is_err() {
+        println!("  ✗ couldn't write the new key file.");
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&keyfile, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let rel_key = format!("keys/{}.pem", domain.name);
+    if !rewrite(config_path, |toml| {
+        mailbourne_core::edit::set_domain_dkim(toml, &domain.name, &new_selector, &rel_key)
+    }) {
+        return false;
+    }
+
+    println!("\n  ✓ rotated {} to selector {new_selector}.", domain.name);
+    println!("\n  publish the NEW record (paste at your DNS provider):");
+    println!(
+        "    {new_selector}._domainkey.{}   TXT   {}",
+        domain.name, pair.dns_record_value
+    );
+    println!(
+        "\n  heads up: {} now signs with the new key, so publish this before your",
+        domain.name
+    );
+    println!("  next send or DKIM will fail until it's live. once it verifies, you can");
+    println!("  delete the old '{old_selector}' record.");
+    true
+}
+
+/// Change a domain's direction (out / in / both).
+#[cfg(feature = "cli")]
+fn change_mode(
+    theme: &dialoguer::theme::ColorfulTheme,
+    config_path: &std::path::Path,
+    name: &str,
+) -> bool {
+    use dialoguer::Select;
+    use mailbourne_core::config::Mode;
+
+    let modes = [
+        "send-only (out)",
+        "send + receive (both)",
+        "receive-only (in)",
+    ];
+    let m = match Select::with_theme(theme)
+        .with_prompt("new mode")
+        .items(&modes)
+        .default(0)
+        .interact_opt()
+    {
+        Ok(Some(i)) => i,
+        _ => return false,
+    };
+    let mode = [Mode::Out, Mode::Both, Mode::In][m];
+
+    if rewrite(config_path, |toml| {
+        mailbourne_core::edit::set_domain_mode(toml, name, mode)
+    }) {
+        println!("  ✓ {name} is now {}.", mode_label(mode));
+        if mode == Mode::Out {
+            println!("  (its MX is left alone — inbound stays with your current provider.)");
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Remove a domain from the registry (keys stay on disk).
+#[cfg(feature = "cli")]
+fn remove_domain_flow(
+    theme: &dialoguer::theme::ColorfulTheme,
+    config_path: &std::path::Path,
+    name: &str,
+) -> bool {
+    use dialoguer::Confirm;
+
+    let sure = Confirm::with_theme(theme)
+        .with_prompt(format!(
+            "remove {name}? (its key file stays; DNS records go stale)"
+        ))
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+    if !sure {
+        return false;
+    }
+
+    if rewrite(config_path, |toml| {
+        mailbourne_core::edit::remove_domain(toml, name)
+    }) {
+        println!("  ✓ removed {name} from the registry.");
+        println!("  its SPF / DKIM / DMARC records at your DNS provider are now unused —");
+        println!("  delete them whenever you like. the key file is still in keys/.");
+        true
+    } else {
+        false
+    }
+}
+
+/// Reads the config, applies a format-preserving edit, writes it back.
+/// Returns whether it succeeded (and reports the reason if not).
+#[cfg(feature = "cli")]
+fn rewrite<F>(config_path: &std::path::Path, edit: F) -> bool
+where
+    F: FnOnce(&str) -> Result<String, mailbourne_core::edit::EditError>,
+{
+    let toml = match std::fs::read_to_string(config_path) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("  ✗ couldn't read the config: {e}");
+            return false;
+        }
+    };
+    match edit(&toml) {
+        Ok(updated) => {
+            if let Err(e) = std::fs::write(config_path, updated) {
+                println!("  ✗ couldn't write the config: {e}");
+                return false;
+            }
+            true
+        }
+        Err(e) => {
+            println!("  ✗ {e}");
+            false
         }
     }
 }

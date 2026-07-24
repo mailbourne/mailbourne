@@ -14,3 +14,4 @@ workspace = true
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"
+toml_edit = "0.22"
