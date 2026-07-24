@@ -5,23 +5,61 @@
 > Single binary, Rust-native, with a built-in inspector for DNS, DKIM, and
 > deliverability.
 
-**Status: brewing.** ☕
-
-Nothing to install yet. The name is reserved across
+**Status: brewing.** ☕ Early days — outbound sending and the guided console
+work today; receiving and the full daemon are in progress. Published across
 [crates.io](https://crates.io/crates/mailbourne),
 [npm](https://www.npmjs.com/package/mailbourne), and
-[PyPI](https://pypi.org/project/mailbourne/) while the engine is built.
+[PyPI](https://pypi.org/project/mailbourne/) as it's built.
 
-## What this will be
+## What it is
 
-- **One binary** that sends, receives, and explains itself — `mailbourne run`
-  and the logs talk you through everything still missing, from DKIM records
-  to PTR tickets.
-- **A built-in inspector** — `mailbourne inspect --domain example.com` probes any
-  domain's mail health (MX, SPF, DKIM, DMARC, TLS, PTR, blocklists) and
-  teaches as it diagnoses. Works on your existing mail setup, no install.
-- **A library** — the same engine embeds in Rust applications
-  (`cargo add mailbourne`), diagnostics included.
+- **A console you just run.** No subcommand — bare `mailbourne` opens a
+  guided home of your domains, each with a live status, and drilling into one
+  shows its health *with the exact records to paste*. `mailbourne serve` runs
+  the daemon; `docker run … mailbourne` does it for you.
+- **A built-in inspector.** It checks any domain's mail health — MX, SPF,
+  DKIM, DMARC, TLS, PTR, blocklists — and teaches as it diagnoses, in plain
+  language, never "error 0x2F".
+- **A library.** The same engine embeds in Rust apps (`cargo add
+  mailbourne`), diagnostics included.
+
+## What it feels like
+
+Run it. Bare `mailbourne` opens the console — your domains at a glance,
+framed as encouragement, never blame:
+
+```text
+☕ mail.zebflow.com
+
+  *@zebflow.com        send + receive    all sorted ☕
+  *@id.zebflow.com     send-only         2 to improve
+  ＋ add a domain
+  ⚙  server settings
+  ↻ refresh
+  quit
+```
+
+Drill into a domain and you land on its health — with the exact records to
+paste right there, no back-and-forth to another screen:
+
+```text
+☕ *@id.zebflow.com  ·  send-only
+   mail via mail.zebflow.com
+
+   HEALTH   (paste anything marked ⚠ at your DNS provider)
+   ✓ SPF     sorted
+   ⚠ DKIM    not published yet — paste this:
+        mb2026._domainkey.id.zebflow.com   TXT   v=DKIM1; k=rsa; p=MIIB…
+   ⚠ DMARC   not published yet — paste this:
+        _dmarc.id.zebflow.com   TXT   v=DMARC1; p=none; rua=mailto:you@…
+
+   2 to improve
+```
+
+Add a domain, rotate its DKIM key, change what it does, send a test — all
+from the same guided menus, each ending by showing you exactly what changed.
+For scripting, every action has a plain subcommand too (`mailbourne domain
+add`, `mailbourne send`, …).
 
 ## The map of email (and where it trips people up)
 
@@ -63,7 +101,7 @@ authentication is engineering (we nail it); reputation is patience (we
 show you the truth).
 
 **The things that quietly get people wrong** — every one of these is a check
-`mailbourne inspect` is built to catch:
+the inspector is built to catch:
 
 - a placeholder pasted verbatim into a DNS record (`ip4:VPS_IP`)
 - **two** SPF records where only one is allowed (silent permanent failure)
