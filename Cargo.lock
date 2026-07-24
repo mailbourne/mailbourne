@@ -1069,6 +1069,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mailbourne-in"
+version = "0.0.4"
+
+[[package]]
 name = "mailbourne-inspect"
 version = "0.0.4"
 
