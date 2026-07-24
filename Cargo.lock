@@ -1053,8 +1053,10 @@ dependencies = [
  "clap",
  "dialoguer",
  "mailbourne-core",
+ "mailbourne-in",
  "mailbourne-out",
  "mailbourne-probe",
+ "mailbourne-store",
  "tokio",
 ]
 
@@ -1103,6 +1105,14 @@ name = "mailbourne-probe"
 version = "0.0.4"
 dependencies = [
  "hickory-resolver 0.24.4",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "mailbourne-store"
+version = "0.0.4"
+dependencies = [
  "thiserror 2.0.19",
  "tokio",
 ]

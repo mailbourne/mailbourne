@@ -1,0 +1,18 @@
+[package]
+name = "mailbourne-store"
+description = "Where received mail rests: a Maildir on disk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["fs"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["fs", "rt-multi-thread", "macros"] }

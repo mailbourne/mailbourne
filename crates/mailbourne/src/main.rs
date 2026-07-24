@@ -59,6 +59,21 @@ enum Command {
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
+    /// Run the receiving server (the daemon; docker's default command).
+    Serve {
+        /// Address to bind.
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
+        /// Port to listen on (25 is the real MX port; needs privilege).
+        #[arg(long, default_value_t = 25)]
+        port: u16,
+        /// Where to store received mail (a Maildir root).
+        #[arg(long, default_value = "mail")]
+        store: std::path::PathBuf,
+        /// Path to mailbourne.toml (same search as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
     /// DNS toolbox: mint keys and print the records to publish.
     Dns {
         #[command(subcommand)]
@@ -241,6 +256,12 @@ async fn run_command(command: Command) -> i32 {
                 }
             }
         }
+        Command::Serve {
+            bind,
+            port,
+            store,
+            config,
+        } => serve_cmd(&bind, port, &store, config.as_deref()).await,
         Command::Domain { command } => match command {
             DomainCommand::Show { name, config } => domain_show(&name, config.as_deref()).await,
             DomainCommand::List { config } => domain_list(config.as_deref()),
@@ -434,4 +455,43 @@ async fn domain_show(name: &str, config_flag: Option<&std::path::Path>) -> i32 {
         );
     }
     0
+}
+
+/// `mailbourne serve` — run the receiving daemon.
+async fn serve_cmd(
+    bind: &str,
+    port: u16,
+    store_path: &std::path::Path,
+    config_flag: Option<&std::path::Path>,
+) -> i32 {
+    let config = match require_config(config_flag) {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let addr: std::net::SocketAddr = match format!("{bind}:{port}").parse() {
+        Ok(a) => a,
+        Err(_) => {
+            eprintln!("✗ {bind}:{port} isn't a valid address to bind.");
+            return 2;
+        }
+    };
+    let store = mailbourne::store::Maildir::at(store_path);
+
+    println!(
+        "☕ mailbourne — serving {} on {addr}",
+        config.server.hostname
+    );
+    println!("   received mail → {}", store_path.display());
+    if port == 25 {
+        println!(
+            "   (port 25 needs privilege — run with sudo or a cap, or use --port 2525 to try it)"
+        );
+    }
+    match mailbourne::serve::run(addr, config.server.hostname.clone(), store).await {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("✗ couldn't serve on {addr}: {e}");
+            1
+        }
+    }
 }
