@@ -15,14 +15,25 @@
 //! out of JSON (no base64 bloat, binary-safe).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A durable, on-disk delivery queue rooted at a directory.
+///
+/// A capped spool (see [`Spool::with_cap`]) bounds the waiting room: once the
+/// live message bytes reach the cap, [`enqueue`](Spool::enqueue) refuses with
+/// [`SpoolError::Full`] rather than let the queue grow until the disk does.
+/// The SMTP session turns that refusal into a `451` — the sender holds the
+/// mail and retries, so nothing is dropped.
 #[derive(Debug, Clone)]
 pub struct Spool {
     dir: PathBuf,
+    /// Byte budget for message bodies; `0` means unlimited.
+    max_bytes: u64,
+    /// Live message-body bytes currently spooled (tracked only when capped).
+    used: Arc<AtomicU64>,
 }
 
 /// One spooled message plus its delivery state.
@@ -63,12 +74,41 @@ pub enum SpoolError {
     /// The metadata file was corrupt.
     #[error("corrupt spool metadata: {0}")]
     Corrupt(String),
+    /// The spool is at its byte cap — the message was not accepted.
+    #[error("spool is full")]
+    Full,
 }
 
 impl Spool {
-    /// Roots a spool at `dir`.
+    /// Roots an **unlimited** spool at `dir` — no cap, no refusals.
     pub fn at(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            max_bytes: 0,
+            used: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Roots a spool at `dir` bounded to `max_bytes` of live message bodies.
+    ///
+    /// Existing entries on disk are re-scanned so a restart resumes with an
+    /// accurate count (bytes already waiting still count against the cap).
+    /// A `max_bytes` of `0` is unlimited, exactly like [`Spool::at`].
+    ///
+    /// # Errors
+    /// Fails if the spool directory can't be read while seeding the count.
+    pub async fn with_cap(dir: impl Into<PathBuf>, max_bytes: u64) -> Result<Self, SpoolError> {
+        let dir = dir.into();
+        let used = if max_bytes == 0 {
+            0
+        } else {
+            scan_used_bytes(&dir).await?
+        };
+        Ok(Self {
+            dir,
+            max_bytes,
+            used: Arc::new(AtomicU64::new(used)),
+        })
     }
 
     /// Writes a newly-accepted message to disk, due for immediate delivery
@@ -85,9 +125,19 @@ impl Spool {
         targets: &[String],
         now_unix: u64,
     ) -> Result<String, SpoolError> {
+        // Backpressure: refuse before writing once the room is full. Slight
+        // overshoot under concurrent enqueues is fine — it's a soft cap.
+        if self.max_bytes > 0
+            && self.used.load(Ordering::Acquire) + data.len() as u64 > self.max_bytes
+        {
+            return Err(SpoolError::Full);
+        }
         tokio::fs::create_dir_all(&self.dir).await?;
         let id = unique_id();
         tokio::fs::write(self.dir.join(format!("{id}.eml")), data).await?;
+        if self.max_bytes > 0 {
+            self.used.fetch_add(data.len() as u64, Ordering::AcqRel);
+        }
         let meta = Meta {
             mail_from: mail_from.to_string(),
             rcpt_to: rcpt_to.to_vec(),
@@ -166,8 +216,14 @@ impl Spool {
         next_retry_unix: u64,
     ) -> Result<(), SpoolError> {
         if still_pending.is_empty() {
-            // Fully delivered — drop both files.
-            let _ = tokio::fs::remove_file(self.dir.join(format!("{id}.eml"))).await;
+            // Fully delivered — drop both files and give the bytes back.
+            let eml = self.dir.join(format!("{id}.eml"));
+            if self.max_bytes > 0
+                && let Ok(meta) = tokio::fs::metadata(&eml).await
+            {
+                self.used.fetch_sub(meta.len(), Ordering::AcqRel);
+            }
+            let _ = tokio::fs::remove_file(&eml).await;
             let _ = tokio::fs::remove_file(self.dir.join(format!("{id}.json"))).await;
             return Ok(());
         }
@@ -186,6 +242,24 @@ impl Spool {
     }
 }
 
+/// Sums the sizes of every `.eml` body under `dir` — the live byte count a
+/// capped spool resumes from. A missing directory is simply zero.
+async fn scan_used_bytes(dir: &std::path::Path) -> Result<u64, SpoolError> {
+    let mut total = 0u64;
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(dirent) = entries.next_entry().await? {
+        let path = dirent.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("eml") {
+            total += dirent.metadata().await?.len();
+        }
+    }
+    Ok(total)
+}
+
 fn unique_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -201,6 +275,87 @@ mod tests {
 
     fn temp() -> PathBuf {
         std::env::temp_dir().join(format!("mb-spool-{}", unique_id()))
+    }
+
+    // A message whose `.eml` body is exactly `n` bytes, so cap math is exact.
+    fn body(n: usize) -> Vec<u8> {
+        vec![b'x'; n]
+    }
+
+    #[tokio::test]
+    async fn enqueue_past_the_cap_is_refused() {
+        // The waiting room is bounded: once it's full, a new message is
+        // refused with `Full` (which the SMTP session turns into a 451 —
+        // backpressure, never a silent drop).
+        let dir = temp();
+        let spool = Spool::with_cap(&dir, 100).await.unwrap();
+        spool
+            .enqueue("a@b.com", &["x@y.z".into()], &body(60), &["t".into()], 1)
+            .await
+            .unwrap();
+        let err = spool
+            .enqueue("a@b.com", &["x@y.z".into()], &body(60), &["t".into()], 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SpoolError::Full));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn settling_a_delivered_message_frees_capacity() {
+        // Delivery drains the room: once a message leaves, its space is
+        // reusable — the cap tracks live bytes, not a high-water mark.
+        let dir = temp();
+        let spool = Spool::with_cap(&dir, 100).await.unwrap();
+        let id = spool
+            .enqueue("a@b.com", &["x@y.z".into()], &body(60), &["t".into()], 1)
+            .await
+            .unwrap();
+        spool.settle(&id, &[], 1, 0).await.unwrap(); // delivered → removed
+        // Now there's room again.
+        spool
+            .enqueue("a@b.com", &["x@y.z".into()], &body(60), &["t".into()], 1)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_reopened_capped_spool_counts_what_is_already_there() {
+        // Restart safety: a capped spool re-scans the disk on open, so bytes
+        // already waiting still count against the cap.
+        let dir = temp();
+        Spool::with_cap(&dir, 1000)
+            .await
+            .unwrap()
+            .enqueue("a@b.com", &["x@y.z".into()], &body(60), &["t".into()], 1)
+            .await
+            .unwrap();
+
+        let reopened = Spool::with_cap(&dir, 100).await.unwrap();
+        let err = reopened
+            .enqueue("a@b.com", &["x@y.z".into()], &body(60), &["t".into()], 1)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SpoolError::Full),
+            "existing 60 + new 60 > 100"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_uncapped_spool_never_refuses() {
+        // `at` is the unlimited waiting room — no cap, no refusals.
+        let dir = temp();
+        let spool = Spool::at(&dir);
+        for _ in 0..5 {
+            spool
+                .enqueue("a@b.com", &["x@y.z".into()], &body(1_000), &["t".into()], 1)
+                .await
+                .unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

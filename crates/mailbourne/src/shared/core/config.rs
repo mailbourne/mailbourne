@@ -47,6 +47,17 @@ pub struct ServerConfig {
     /// The server's own name — used in SMTP greetings (`EHLO`), as the
     /// PTR target, and as the TLS certificate name. One per server.
     pub hostname: String,
+    /// Byte budget for the delivery spool — the waiting room between `250`
+    /// and delivery. When full, new mail earns a `451` (try again later), so
+    /// a stuck target can't grow the queue until the disk fills. Defaults to
+    /// 1 GiB; `0` means unlimited.
+    #[serde(default = "default_spool_max_bytes")]
+    pub spool_max_bytes: u64,
+}
+
+/// One gibibyte — a sane default ceiling for accepted-but-undelivered mail.
+fn default_spool_max_bytes() -> u64 {
+    1024 * 1024 * 1024
 }
 
 /// One managed domain: its name, its direction, its signing identity.

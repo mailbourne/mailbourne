@@ -527,6 +527,7 @@ async fn serve_cmd(
         policy,
         targets,
         spool_dir,
+        config.server.spool_max_bytes,
     )
     .await
     {

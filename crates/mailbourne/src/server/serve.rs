@@ -57,7 +57,9 @@ impl Commit for SpoolCommit {
 /// `policy` decides which recipients to accept (never an open relay);
 /// `targets` are where accepted mail is routed (a mailbox store, a channel or
 /// function into an embedding app, and — later — forward / webhook / queue);
-/// `spool_dir` is where accepted-but-not-yet-delivered mail lives on disk.
+/// `spool_dir` is where accepted-but-not-yet-delivered mail lives on disk;
+/// `spool_max_bytes` caps that waiting room (`0` = unlimited) — when it's
+/// full the session answers `451`, so a stuck target can't fill the disk.
 ///
 /// # Errors
 /// Fails if the address can't be bound (e.g. port 25 needs privilege, or is
@@ -68,8 +70,12 @@ pub async fn run(
     policy: Arc<dyn Policy>,
     targets: Targets,
     spool_dir: PathBuf,
+    spool_max_bytes: u64,
 ) -> std::io::Result<()> {
-    let spool = Spool::at(spool_dir);
+    // Cap the waiting room (0 = unlimited). A full spool answers 451, not 250.
+    let spool = Spool::with_cap(spool_dir, spool_max_bytes)
+        .await
+        .map_err(std::io::Error::other)?;
     let target_names: Vec<String> = targets.iter().map(|t| t.name().to_string()).collect();
 
     // The delivery worker runs alongside the acceptor: it drains the spool to
