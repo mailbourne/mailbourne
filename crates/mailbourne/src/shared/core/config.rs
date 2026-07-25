@@ -65,6 +65,36 @@ pub struct ServerConfig {
     pub mailbox_quota_bytes: u64,
 }
 
+/// One mailbox account: an address that really exists, its hashed password
+/// (for SMTP AUTH), and its storage quota.
+///
+/// ```toml
+/// [[account]]
+/// address = "bob@ours.com"
+/// password_hash = "$argon2id$v=19$..."
+/// quota_bytes = 2147483648
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountConfig {
+    /// The full mailbox address (`local@domain`).
+    pub address: String,
+    /// Argon2 PHC-string hash of the account's password. Never the password
+    /// itself — mailbourne only ever stores the hash.
+    pub password_hash: String,
+    /// Per-mailbox byte quota; `0` (the default) means unlimited.
+    #[serde(default)]
+    pub quota_bytes: u64,
+    /// Whether the account is active. Defaults to `true`; set `false` to
+    /// suspend an account without deleting it.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// serde default for `enabled` — an account exists to be usable.
+fn default_true() -> bool {
+    true
+}
+
 /// One forwarding rule: mail for `match` is relayed on to `to`.
 ///
 /// ```toml
@@ -111,6 +141,9 @@ pub struct Config {
     /// Forwarding rules — aliases relayed on to another address.
     #[serde(default, rename = "forward")]
     pub forwards: Vec<ForwardRule>,
+    /// Mailbox accounts — the addresses that really exist here.
+    #[serde(default, rename = "account")]
+    pub accounts: Vec<AccountConfig>,
 }
 
 /// Why a configuration was refused.

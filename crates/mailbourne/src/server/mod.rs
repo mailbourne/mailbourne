@@ -14,6 +14,7 @@
 //! - [`serve`] — bind and serve; the daemon face
 //! - [`worker`] — the async delivery worker
 
+pub mod accounts;
 pub mod forward;
 pub mod inbound;
 pub mod policy;
