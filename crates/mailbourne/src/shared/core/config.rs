@@ -58,6 +58,11 @@ pub struct ServerConfig {
     /// retried through the spool if the endpoint is down.
     #[serde(default)]
     pub webhook_url: Option<String>,
+    /// Per-mailbox byte quota. When a recipient's mailbox would exceed this,
+    /// the message is refused with `452` (mailbox full) *before* the `250` —
+    /// so nothing is silently lost. Defaults to `0` (unlimited).
+    #[serde(default)]
+    pub mailbox_quota_bytes: u64,
 }
 
 /// One forwarding rule: mail for `match` is relayed on to `to`.

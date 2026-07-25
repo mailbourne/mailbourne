@@ -63,6 +63,28 @@ impl Maildir {
         tokio::fs::rename(&tmp, &new).await?;
         Ok(name)
     }
+
+    /// The total bytes a mailbox currently holds (`new/` + `cur/`) — what a
+    /// quota is measured against. A missing or unsafe mailbox is simply `0`.
+    pub async fn size(&self, mailbox: &str) -> u64 {
+        let Some(safe) = safe_mailbox(mailbox) else {
+            return 0;
+        };
+        let dir = self.root.join(&safe);
+        let mut total = 0u64;
+        for sub in ["new", "cur"] {
+            let mut entries = match tokio::fs::read_dir(dir.join(sub)).await {
+                Ok(entries) => entries,
+                Err(_) => continue, // subdir doesn't exist yet → nothing stored
+            };
+            while let Ok(Some(dirent)) = entries.next_entry().await {
+                if let Ok(meta) = dirent.metadata().await {
+                    total += meta.len();
+                }
+            }
+        }
+        total
+    }
 }
 
 /// Validates a mailbox name derived from a recipient address. Allows only
@@ -138,6 +160,23 @@ mod tests {
         assert!(safe_mailbox("a/b").is_none());
         assert!(safe_mailbox("").is_none());
         assert!(safe_mailbox("has space").is_none());
+    }
+
+    #[tokio::test]
+    async fn size_sums_a_mailboxs_bytes_and_is_zero_when_empty() {
+        let root = temp_root("size");
+        let store = Maildir::at(&root);
+        assert_eq!(
+            store.size("bob@x.io").await,
+            0,
+            "a mailbox with no mail is 0"
+        );
+        store.store("bob@x.io", b"12345").await.unwrap(); // 5
+        store.store("bob@x.io", b"678").await.unwrap(); // 3
+        assert_eq!(store.size("bob@x.io").await, 8);
+        // A different, untouched mailbox is still 0.
+        assert_eq!(store.size("alice@x.io").await, 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

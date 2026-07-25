@@ -498,7 +498,7 @@ async fn serve_cmd(
     // this list as routing grows.
     let mut target_list: Vec<std::sync::Arc<dyn mailbourne::server::route::DeliveryTarget>> =
         vec![std::sync::Arc::new(
-            mailbourne::server::route::MailboxTarget::new(store),
+            mailbourne::server::route::MailboxTarget::new(store.clone()),
         )];
     if let Some(url) = &config.server.webhook_url {
         target_list.push(std::sync::Arc::new(
@@ -527,6 +527,12 @@ async fn serve_cmd(
     for rule in &config.forwards {
         println!("   forward {} → {}", rule.match_recipient, rule.to);
     }
+    if config.server.mailbox_quota_bytes > 0 {
+        println!(
+            "   mailbox quota → {} MiB",
+            config.server.mailbox_quota_bytes / (1024 * 1024)
+        );
+    }
     if hosted.is_empty() {
         println!("   ⚠ no domains registered to receive (mode in/both) — every recipient");
         println!("     will be refused. add one: mailbourne domain add <name>");
@@ -550,6 +556,8 @@ async fn serve_cmd(
         targets,
         spool_dir,
         config.server.spool_max_bytes,
+        store,
+        config.server.mailbox_quota_bytes,
     )
     .await
     {

@@ -38,19 +38,42 @@ pub struct ReceivedMessage {
     pub data: Vec<u8>,
 }
 
+/// Why a commit was refused, and what to tell the sender.
+///
+/// Carries the SMTP reply code so the door can answer precisely — `451` when
+/// the spool is temporarily full, `452` when a recipient's mailbox is full —
+/// rather than one blunt failure code for everything.
+#[derive(Debug)]
+pub struct CommitReject {
+    /// The SMTP reply code (a `4xx` — the sender should retry later).
+    pub code: u16,
+    /// The human-readable reason, sent alongside the code.
+    pub message: String,
+}
+
+impl CommitReject {
+    /// A rejection with an explicit code and reason.
+    pub fn new(code: u16, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
 /// A durable sink for an accepted message.
 ///
 /// The session calls [`commit`](Commit::commit) at the moment a message's
 /// DATA ends — **before** it answers `250`. Returning `Ok` means the message
 /// is safely persisted (the caller may now be told it's accepted); returning
-/// `Err` makes the session answer `451` instead, so the sender retries rather
-/// than believe we took mail we then dropped. This is mailbourne's
-/// never-lose-accepted-mail contract, enforced at the wire.
+/// `Err` makes the session answer with the rejection's code instead, so the
+/// sender retries rather than believe we took mail we then dropped. This is
+/// mailbourne's never-lose-accepted-mail contract, enforced at the wire.
 #[async_trait]
 pub trait Commit: Send + Sync {
     /// Durably record one accepted message. `Ok` → the session answers
-    /// `250`; `Err(reason)` → it answers `451` (temporary).
-    async fn commit(&self, message: &ReceivedMessage) -> Result<(), String>;
+    /// `250`; `Err(reject)` → it answers `reject.code` (a `4xx`).
+    async fn commit(&self, message: &ReceivedMessage) -> Result<(), CommitReject>;
 }
 
 /// Runs one SMTP session as the server, returning every message accepted
@@ -150,15 +173,15 @@ where
                             data,
                         };
                         // Durably record BEFORE promising acceptance. If the
-                        // sink can't take it, we say 451 (try again) — never a
-                        // 250 for mail we didn't persist.
+                        // sink can't take it, we answer its code (try again) —
+                        // never a 250 for mail we didn't persist.
                         match commit.commit(&message).await {
                             Ok(()) => {
                                 messages.push(message);
                                 reply(&mut write, 250, "message accepted for delivery").await?;
                             }
-                            Err(_) => {
-                                reply(&mut write, 451, "temporary local error; try again").await?;
+                            Err(reject) => {
+                                reply(&mut write, reject.code, &reject.message).await?;
                             }
                         }
                     }
@@ -267,7 +290,7 @@ mod tests {
     struct AcceptAll;
     #[async_trait]
     impl Commit for AcceptAll {
-        async fn commit(&self, _message: &ReceivedMessage) -> Result<(), String> {
+        async fn commit(&self, _message: &ReceivedMessage) -> Result<(), CommitReject> {
             Ok(())
         }
     }
@@ -276,8 +299,8 @@ mod tests {
     struct RejectAll;
     #[async_trait]
     impl Commit for RejectAll {
-        async fn commit(&self, _message: &ReceivedMessage) -> Result<(), String> {
-            Err("disk full".to_string())
+        async fn commit(&self, _message: &ReceivedMessage) -> Result<(), CommitReject> {
+            Err(CommitReject::new(451, "disk full"))
         }
     }
 

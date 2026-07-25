@@ -13,10 +13,11 @@
 //! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) arrives next.
 
 use crate::send::retry::Policy as RetryPolicy;
-use crate::server::inbound::session::{Commit, ReceivedMessage};
+use crate::server::inbound::session::{Commit, CommitReject, ReceivedMessage};
 use crate::server::policy::Policy;
 use crate::server::route::DeliveryTarget;
 use crate::server::spool::Spool;
+use crate::server::store::Maildir;
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -28,15 +29,34 @@ pub type Targets = Arc<Vec<Arc<dyn DeliveryTarget>>>;
 
 /// The durable seam between accepting a message and delivering it: the SMTP
 /// session commits each message to the spool (recording which targets it's
-/// due for) before answering `250`. Delivery itself is the worker's job.
+/// due for) before answering `250`. Two limits are enforced here, at the
+/// door, so a refusal reaches the sender instead of a lie:
+///
+/// - a recipient whose **mailbox is full** earns `452` (try later);
+/// - a **full spool** earns `451` (the queue is backed up).
 struct SpoolCommit {
     spool: Spool,
     target_names: Vec<String>,
+    store: Maildir,
+    /// Per-mailbox byte quota; `0` = unlimited.
+    mailbox_quota: u64,
 }
 
 #[async_trait]
 impl Commit for SpoolCommit {
-    async fn commit(&self, message: &ReceivedMessage) -> Result<(), String> {
+    async fn commit(&self, message: &ReceivedMessage) -> Result<(), CommitReject> {
+        // Inbox quota: refuse before 250 if any recipient's mailbox is full,
+        // so spam or a neglected mailbox can't silently swallow new mail.
+        if self.mailbox_quota > 0 {
+            for rcpt in &message.rcpt_to {
+                if self.store.size(rcpt).await + message.data.len() as u64 > self.mailbox_quota {
+                    return Err(CommitReject::new(
+                        452,
+                        format!("mailbox for {rcpt} is full, try again later"),
+                    ));
+                }
+            }
+        }
         self.spool
             .enqueue(
                 &message.mail_from,
@@ -47,7 +67,7 @@ impl Commit for SpoolCommit {
             )
             .await
             .map(|_id| ())
-            .map_err(|e| e.to_string())
+            .map_err(|_| CommitReject::new(451, "server is busy, try again later"))
     }
 }
 
@@ -59,7 +79,9 @@ impl Commit for SpoolCommit {
 /// function into an embedding app, and — later — forward / webhook / queue);
 /// `spool_dir` is where accepted-but-not-yet-delivered mail lives on disk;
 /// `spool_max_bytes` caps that waiting room (`0` = unlimited) — when it's
-/// full the session answers `451`, so a stuck target can't fill the disk.
+/// full the session answers `451`, so a stuck target can't fill the disk;
+/// `store` and `mailbox_quota_bytes` cap each recipient's mailbox (`0` =
+/// unlimited) — a full mailbox answers `452` before the `250`.
 ///
 /// # Errors
 /// Fails if the address can't be bound (e.g. port 25 needs privilege, or is
@@ -71,6 +93,8 @@ pub async fn run(
     targets: Targets,
     spool_dir: PathBuf,
     spool_max_bytes: u64,
+    store: Maildir,
+    mailbox_quota_bytes: u64,
 ) -> std::io::Result<()> {
     // Cap the waiting room (0 = unlimited). A full spool answers 451, not 250.
     let spool = Spool::with_cap(spool_dir, spool_max_bytes)
@@ -95,6 +119,8 @@ pub async fn run(
         let commit = SpoolCommit {
             spool: spool.clone(),
             target_names: target_names.clone(),
+            store: store.clone(),
+            mailbox_quota: mailbox_quota_bytes,
         };
         tokio::spawn(async move {
             handle_connection(stream, &hostname, policy.as_ref(), &commit).await;
@@ -138,6 +164,8 @@ mod tests {
         let commit = SpoolCommit {
             spool: spool.clone(),
             target_names: targets.iter().map(|t| t.name().to_string()).collect(),
+            store: Maildir::at(std::env::temp_dir().join("mb-serve-unused-store")),
+            mailbox_quota: 0, // unlimited for the routing tests
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -213,5 +241,47 @@ mod tests {
             .expect("a message should arrive on the channel");
         assert_eq!(received.rcpt_to, vec!["bob@mail.test".to_string()]);
         assert!(String::from_utf8_lossy(&received.data).contains("hi from the future"));
+    }
+
+    #[tokio::test]
+    async fn a_full_mailbox_is_refused_with_452_before_the_250() {
+        // The inbox quota, enforced at commit (before 250): a recipient whose
+        // mailbox is full earns 452, while an empty mailbox is accepted.
+        let root = std::env::temp_dir().join(format!(
+            "mb-quota-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Maildir::at(&root);
+        store
+            .store("bob@mail.test", &vec![b'x'; 100])
+            .await
+            .unwrap(); // 100 used
+
+        let commit = SpoolCommit {
+            spool: Spool::at(root.join("spool")),
+            target_names: vec!["mailbox".to_string()],
+            store: store.clone(),
+            mailbox_quota: 120, // 100 + a 30-byte message = 130 > 120
+        };
+
+        let full = ReceivedMessage {
+            mail_from: "a@b.test".to_string(),
+            rcpt_to: vec!["bob@mail.test".to_string()],
+            data: vec![b'y'; 30],
+        };
+        let reject = commit.commit(&full).await.unwrap_err();
+        assert_eq!(reject.code, 452, "a full mailbox must be 452, not 250");
+
+        // A different, empty mailbox has room.
+        let ok = ReceivedMessage {
+            mail_from: "a@b.test".to_string(),
+            rcpt_to: vec!["alice@mail.test".to_string()],
+            data: vec![b'y'; 30],
+        };
+        assert!(commit.commit(&ok).await.is_ok());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
