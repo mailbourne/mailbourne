@@ -1,22 +1,22 @@
 //! # serve — run mailbourne as a receiving server
 //!
 //! Binds a listener and, for each connection, runs the server-side SMTP
-//! session ([`crate::inbound`]). An accepted message is written to the durable
+//! session ([`crate::server::inbound`]). An accepted message is written to the durable
 //! [`Spool`] **before** the session answers `250` — so a crash after `250`
-//! loses nothing — and a background [`worker`](crate::worker) drains the spool
+//! loses nothing — and a background [`worker`](crate::server::worker) drains the spool
 //! to the delivery targets, retrying failures with backoff. This is the daemon
 //! face of the engine — `mailbourne serve`, and the docker image's default
 //! command.
 //!
-//! Recipients are validated by the [`crate::policy`] layer — only mail
+//! Recipients are validated by the [`crate::server::policy`] layer — only mail
 //! for domains we host is accepted (never an open relay). The wider policy
 //! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) arrives next.
 
-use crate::inbound::session::{Commit, ReceivedMessage};
-use crate::out::retry::Policy as RetryPolicy;
-use crate::policy::Policy;
-use crate::route::DeliveryTarget;
-use crate::spool::Spool;
+use crate::send::retry::Policy as RetryPolicy;
+use crate::server::inbound::session::{Commit, ReceivedMessage};
+use crate::server::policy::Policy;
+use crate::server::route::DeliveryTarget;
+use crate::server::spool::Spool;
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -43,7 +43,7 @@ impl Commit for SpoolCommit {
                 &message.rcpt_to,
                 &message.data,
                 &self.target_names,
-                crate::worker::now_unix(),
+                crate::server::worker::now_unix(),
             )
             .await
             .map(|_id| ())
@@ -76,7 +76,7 @@ pub async fn run(
     // the targets and reschedules failures. Bind first so a bind error is
     // reported before we spawn anything.
     let listener = TcpListener::bind(addr).await?;
-    tokio::spawn(crate::worker::run(
+    tokio::spawn(crate::server::worker::run(
         spool.clone(),
         targets.clone(),
         RetryPolicy::default(),
@@ -105,16 +105,16 @@ async fn handle_connection(
     policy: &dyn Policy,
     commit: &dyn Commit,
 ) {
-    let _ = crate::inbound::session::serve(stream, hostname, policy, commit).await;
+    let _ = crate::server::inbound::session::serve(stream, hostname, policy, commit).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EmailAddress, Envelope, Message};
-    use crate::out::conversation::Outcome;
-    use crate::route::{ChannelTarget, MailboxTarget};
-    use crate::store::Maildir;
+    use crate::send::conversation::Outcome;
+    use crate::server::route::{ChannelTarget, MailboxTarget};
+    use crate::server::store::Maildir;
+    use crate::shared::core::{EmailAddress, Envelope, Message};
 
     /// Sends one message from our outbound engine to a one-shot listener,
     /// which commits it to a fresh spool; then ticks the worker once so the
@@ -138,7 +138,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
+            let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
             handle_connection(stream, "mail.test", &policy, &commit).await;
         });
 
@@ -148,7 +148,7 @@ mod tests {
         };
         let message =
             Message::from_raw(b"Subject: loopback\r\n\r\nhi from the future\r\n".to_vec());
-        let outcome = crate::out::send_to_host(
+        let outcome = crate::send::send_to_host(
             &addr.ip().to_string(),
             addr.port(),
             "mail.sender.test",
@@ -161,10 +161,10 @@ mod tests {
         server.await.unwrap();
 
         // The session has spooled the message; now the worker delivers it.
-        crate::worker::tick(
+        crate::server::worker::tick(
             &spool,
             &targets,
-            crate::worker::now_unix(),
+            crate::server::worker::now_unix(),
             &RetryPolicy::default(),
         )
         .await

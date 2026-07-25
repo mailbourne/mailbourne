@@ -1,7 +1,7 @@
 //! # dkim — mint keys, derive the record
 //!
 //! DKIM key *management*, distinct from the two things that use it: signing
-//! an outgoing message (that's [`out::sign`](crate::out::sign), which needs
+//! an outgoing message (that's [`out::sign`](crate::send::sign), which needs
 //! the full crypto-over-the-wire stack) and checking what DNS actually serves
 //! (that's the inspector). Minting a keypair and deriving its publishable
 //! `v=DKIM1; …` record need only pure-Rust RSA — no network, no TLS — so they
@@ -102,7 +102,7 @@ pub fn public_record_for(private_key_pem: &str) -> Result<String, DkimError> {
 /// A throwaway 2048-bit key generated for tests only — its private half
 /// lives in a public repo, so it must never sign real mail. (2048 is also
 /// the floor the crypto backend enforces, and the production standard for
-/// DKIM.) Shared with [`out::sign`](crate::out::sign)'s signing tests.
+/// DKIM.) Shared with [`out::sign`](crate::send::sign)'s signing tests.
 #[cfg(test)]
 pub(crate) const TEST_KEY: &str = r#"-----BEGIN RSA PRIVATE KEY-----
 MIIEowIBAAKCAQEAslYW5+62eTeuYabVNJNDqdrerunNqpjKSC8a4VsMypsvQHFl

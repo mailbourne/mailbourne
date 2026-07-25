@@ -20,7 +20,7 @@
 //! dkim_key = "keys/ds.example.com.pem"
 //! ```
 
-use crate::core::address::EmailAddress;
+use crate::shared::core::address::EmailAddress;
 use serde::Deserialize;
 
 /// Which directions of mail a domain participates in.

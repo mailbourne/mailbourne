@@ -3,7 +3,7 @@
 //! the other end — everything of ours is the production path.
 #![cfg(feature = "send")]
 
-use mailbourne::out::conversation::Outcome;
+use mailbourne::send::conversation::Outcome;
 use mailbourne::{EmailAddress, Envelope, Message};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -65,7 +65,7 @@ async fn a_message_leaves_through_a_real_socket() {
     };
     let message = Message::from_raw(b"Subject: leaving\r\n\r\ngoodbye!\r\n".to_vec());
 
-    let outcome = mailbourne::out::send_to_host(
+    let outcome = mailbourne::send::send_to_host(
         &addr.ip().to_string(),
         addr.port(),
         "mail.us.example",

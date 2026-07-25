@@ -10,8 +10,8 @@
 //! returns *notes* alongside the answer: the friendly one-liners the CLI
 //! prints so nothing about the decision is ever silent.
 
-use crate::core::EmailAddress;
-use crate::core::config::{Config, Mode};
+use crate::shared::core::EmailAddress;
+use crate::shared::core::config::{Config, Mode};
 
 /// A resolved DKIM signing identity.
 #[derive(Debug, Clone, PartialEq, Eq)]

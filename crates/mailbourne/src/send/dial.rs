@@ -7,7 +7,7 @@
 //!   waiting forever on silence is how queues stall.
 //! - [`secure`]: transform an open stream into a TLS stream (the mechanics
 //!   behind `STARTTLS` — the *choreography* lives in
-//!   [`conversation::deliver_with_starttls`](crate::out::conversation::deliver_with_starttls)).
+//!   [`conversation::deliver_with_starttls`](crate::send::conversation::deliver_with_starttls)).
 //!
 //! If the dial fails, that is a *temporary* condition: try the next MX
 //! host, and if all are silent, the message returns to the queue.

@@ -14,7 +14,7 @@
 //! [`home_labels`], [`home_choice`]) is testable without a terminal; the
 //! interactive loop is a thin `dialoguer` shell over it.
 
-use crate::core::config::{Config, Mode};
+use crate::shared::core::config::{Config, Mode};
 
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
@@ -106,7 +106,7 @@ pub(crate) fn home_choice(domain_count: usize, selected: usize) -> HomeChoice {
 /// — fine for a handful of domains; concurrency is a later optimisation.
 #[cfg(feature = "cli")]
 async fn gather_home_status(config: &Config) -> Vec<DomainStatus> {
-    use crate::sheet::RowStatus;
+    use crate::inspect::sheet::RowStatus;
     let mut out = Vec::new();
     for d in &config.domains {
         let to_do = match crate::inspect::domain(config, &d.name).await {
@@ -220,8 +220,8 @@ fn domain_screen(
         match &cached {
             Some((sheet, _)) => {
                 println!("\n   HEALTH   (paste anything marked ⚠ at your DNS provider)");
-                print!("{}", crate::sheet::render_health(sheet));
-                let to_do = crate::sheet::count_to_do(sheet);
+                print!("{}", crate::inspect::sheet::render_health(sheet));
+                let to_do = crate::inspect::sheet::count_to_do(sheet);
                 println!("\n   {}", encouragement(Some(to_do)));
             }
             None => println!("\n   (couldn't reach DNS — try 're-check')"),
@@ -277,7 +277,7 @@ fn domain_screen(
 fn rekey_domain(
     theme: &dialoguer::theme::ColorfulTheme,
     config_path: &std::path::Path,
-    domain: &crate::core::config::DomainConfig,
+    domain: &crate::shared::core::config::DomainConfig,
 ) -> bool {
     use dialoguer::Input;
 
@@ -300,7 +300,7 @@ fn rekey_domain(
         return false;
     }
 
-    let pair = match crate::dkim::generate_dkim_keypair() {
+    let pair = match crate::shared::dkim::generate_dkim_keypair() {
         Ok(p) => p,
         Err(e) => {
             println!("  ✗ couldn't mint a key: {e}");
@@ -326,7 +326,7 @@ fn rekey_domain(
 
     let rel_key = format!("keys/{}.pem", domain.name);
     if !rewrite(config_path, |toml| {
-        crate::core::edit::set_domain_dkim(toml, &domain.name, &new_selector, &rel_key)
+        crate::shared::core::edit::set_domain_dkim(toml, &domain.name, &new_selector, &rel_key)
     }) {
         return false;
     }
@@ -353,7 +353,7 @@ fn change_mode(
     config_path: &std::path::Path,
     name: &str,
 ) -> bool {
-    use crate::core::config::Mode;
+    use crate::shared::core::config::Mode;
     use dialoguer::Select;
 
     let modes = [
@@ -373,7 +373,7 @@ fn change_mode(
     let mode = [Mode::Out, Mode::Both, Mode::In][m];
 
     if rewrite(config_path, |toml| {
-        crate::core::edit::set_domain_mode(toml, name, mode)
+        crate::shared::core::edit::set_domain_mode(toml, name, mode)
     }) {
         println!("  ✓ {name} is now {}.", mode_label(mode));
         if mode == Mode::Out {
@@ -406,7 +406,7 @@ fn remove_domain_flow(
     }
 
     if rewrite(config_path, |toml| {
-        crate::core::edit::remove_domain(toml, name)
+        crate::shared::core::edit::remove_domain(toml, name)
     }) {
         println!("  ✓ removed {name} from the registry.");
         println!("  its SPF / DKIM / DMARC records at your DNS provider are now unused —");
@@ -422,7 +422,7 @@ fn remove_domain_flow(
 #[cfg(feature = "cli")]
 fn rewrite<F>(config_path: &std::path::Path, edit: F) -> bool
 where
-    F: FnOnce(&str) -> Result<String, crate::core::edit::EditError>,
+    F: FnOnce(&str) -> Result<String, crate::shared::core::edit::EditError>,
 {
     let toml = match std::fs::read_to_string(config_path) {
         Ok(t) => t,
@@ -454,8 +454,8 @@ fn send_test(
     config: &Config,
     domain_name: &str,
 ) {
-    use crate::core::{EmailAddress, Envelope};
-    use crate::out::conversation::Outcome;
+    use crate::send::conversation::Outcome;
+    use crate::shared::core::{EmailAddress, Envelope};
     use dialoguer::Input;
 
     let to: String = match Input::<String>::with_theme(theme)
@@ -472,15 +472,15 @@ fn send_test(
         return;
     };
 
-    let id = crate::identity::resolve(
+    let id = crate::shared::identity::resolve(
         Some(config),
         &from_addr,
-        &crate::identity::Overrides::default(),
+        &crate::shared::identity::Overrides::default(),
     );
     for note in &id.notes {
         println!("  · {note}");
     }
-    let mut message = crate::compose::plain_text(
+    let mut message = crate::shared::compose::plain_text(
         &from_addr,
         &to_addr,
         "mailbourne test ☕",
@@ -490,7 +490,7 @@ fn send_test(
     if let Some(dkim) = &id.dkim {
         match std::fs::read_to_string(&dkim.key_path) {
             Ok(pem) => {
-                match crate::out::sign::dkim_sign(&message, &dkim.domain, &dkim.selector, &pem) {
+                match crate::send::sign::dkim_sign(&message, &dkim.domain, &dkim.selector, &pem) {
                     Ok(signed) => {
                         println!("  DKIM signed ({}) ✓", dkim.selector);
                         message = signed;
@@ -513,7 +513,7 @@ fn send_test(
         rcpt_to: vec![to_addr.clone()],
     };
     println!("  routing to {} and sending…", to_addr.domain());
-    match handle.block_on(crate::out::send(&id.hostname, &envelope, &message)) {
+    match handle.block_on(crate::send::send(&id.hostname, &envelope, &message)) {
         Ok(Outcome::Delivered { reply }) => {
             println!("  ★ accepted — {} {}", reply.code, reply.lines.join(" "));
             println!("  open that inbox and check 'show original' for SPF/DKIM/DMARC.");
@@ -541,7 +541,7 @@ fn server_screen(
 ) {
     use dialoguer::Select;
     let ip = handle
-        .block_on(crate::probe::dns::a(&config.server.hostname))
+        .block_on(crate::inspect::probe::dns::a(&config.server.hostname))
         .unwrap_or_default();
     println!("\n☕ {}  ·  the server (the van)", config.server.hostname);
     match ip.first() {
@@ -595,7 +595,7 @@ fn add_domain(
     let mode_str = ["out", "both", "in"][m];
     let selector = "mb2026";
 
-    let pair = match crate::dkim::generate_dkim_keypair() {
+    let pair = match crate::shared::dkim::generate_dkim_keypair() {
         Ok(p) => p,
         Err(e) => {
             println!("  ✗ couldn't mint a key: {e}");

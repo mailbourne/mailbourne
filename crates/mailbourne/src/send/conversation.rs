@@ -16,7 +16,7 @@
 //!
 //! Every reply's first digit decides everything: `2xx` success, `3xx` "go
 //! on", `4xx` temporary — requeue, `5xx` permanent — bounce. Getting that
-//! decision right is this module's whole job; the [`retry`](crate::out::retry)
+//! decision right is this module's whole job; the [`retry`](crate::send::retry)
 //! policy depends on it.
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
@@ -203,8 +203,8 @@ pub enum Outcome {
 pub async fn deliver<S>(
     stream: S,
     our_hostname: &str,
-    envelope: &crate::core::Envelope,
-    message: &crate::core::Message,
+    envelope: &crate::shared::core::Envelope,
+    message: &crate::shared::core::Message,
 ) -> Result<Outcome, ReplyError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -220,7 +220,7 @@ where
 /// offers it — the *opportunistic TLS* every modern receiver expects.
 ///
 /// The upgrade itself is delegated to `upgrade` (in production, a
-/// [`rustls`] handshake from [`crate::out::dial`]; in tests, anything), which is
+/// [`rustls`] handshake from [`crate::send::dial`]; in tests, anything), which is
 /// what keeps this choreography testable without certificates:
 ///
 /// ```text
@@ -240,8 +240,8 @@ pub async fn deliver_with_starttls<S, U, Fut, T>(
     stream: S,
     upgrade: U,
     our_hostname: &str,
-    envelope: &crate::core::Envelope,
-    message: &crate::core::Message,
+    envelope: &crate::shared::core::Envelope,
+    message: &crate::shared::core::Message,
 ) -> Result<Outcome, ReplyError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -332,8 +332,8 @@ where
 /// Speaks the rest: envelope, letter, verdict, goodbye.
 async fn finish_dialogue<C>(
     mut chat: C,
-    envelope: &crate::core::Envelope,
-    message: &crate::core::Message,
+    envelope: &crate::shared::core::Envelope,
+    message: &crate::shared::core::Message,
 ) -> Result<Outcome, ReplyError>
 where
     C: AsyncBufRead + tokio::io::AsyncWrite + Unpin,
@@ -499,7 +499,7 @@ mod tests {
 
     // ── the full dialogue, against a scripted fake MX ────────────────────
 
-    use crate::core::{EmailAddress, Envelope, Message};
+    use crate::shared::core::{EmailAddress, Envelope, Message};
     use tokio::io::{AsyncWriteExt, BufReader as TokioBufReader, DuplexStream};
 
     /// What the fake server replies at each step. Defaults are a friendly MX.
@@ -699,7 +699,7 @@ mod tests {
             |stream| async move { Ok::<_, std::io::Error>(stream) },
             "mail.us.example",
             &envelope("alice@us.example", "bob@fake.mx"),
-            &crate::core::Message::from_raw(message.to_vec()),
+            &crate::shared::core::Message::from_raw(message.to_vec()),
         )
         .await;
         (outcome, server.await.unwrap())

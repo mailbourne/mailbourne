@@ -1,9 +1,8 @@
-//! # out — a message must leave
+//! # send — a message must leave
 //!
-//! This crate is the irreducible core of email: take responsibility for a
-//! message and move it toward its destination, retrying until it is
-//! delivered or honestly bounced. Everything else in a mail system exists
-//! *around* this act.
+//! The irreducible core of email: take responsibility for a message and move
+//! it toward its destination, retrying until it is delivered or honestly
+//! bounced. Everything else in a mail system exists *around* this act.
 //!
 //! **Read the modules in order — they are the journey of one message:**
 //!
@@ -68,8 +67,8 @@ pub async fn send_to_host(
     host: &str,
     port: u16,
     our_hostname: &str,
-    envelope: &crate::core::Envelope,
-    message: &crate::core::Message,
+    envelope: &crate::shared::core::Envelope,
+    message: &crate::shared::core::Message,
 ) -> Result<conversation::Outcome, SendError> {
     let addr = tokio::net::lookup_host((host, port))
         .await
@@ -108,8 +107,8 @@ pub async fn send_to_host(
 /// [`conversation::Outcome`]s.
 pub async fn send(
     our_hostname: &str,
-    envelope: &crate::core::Envelope,
-    message: &crate::core::Message,
+    envelope: &crate::shared::core::Envelope,
+    message: &crate::shared::core::Message,
 ) -> Result<conversation::Outcome, SendError> {
     let domain = envelope
         .rcpt_to

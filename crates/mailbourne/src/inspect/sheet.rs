@@ -9,7 +9,7 @@
 //! Pure logic: probes gather the evidence elsewhere; this module only
 //! reasons about it. That's what makes every rule below testable offline.
 
-use crate::core::config::Mode;
+use crate::shared::core::config::Mode;
 
 /// What to do about one record.
 #[derive(Debug, Clone, PartialEq, Eq)]

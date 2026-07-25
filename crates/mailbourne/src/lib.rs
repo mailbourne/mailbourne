@@ -34,48 +34,34 @@
 //!
 //! Features: `send` (outbound engine) · `server` (receive + spool + deliver,
 //! implies `send`) · `cli` (the operator binary + console; the default).
-//! Reach for what you need — `mailbourne::out::send`,
-//! `mailbourne::serve::run`, or a `route::FnTarget` for your own handler.
+//! Reach for what you need — `mailbourne::send::send`,
+//! `mailbourne::server::serve::run`, or a `server::route::FnTarget` for your
+//! own delivery handler.
 
-// Always present: the shared vocabulary, DKIM key management, and the
-// built-in inspector — probe the world, judge the evidence. The inspector is
-// part of what mailbourne *is*, not an optional add-on.
-pub mod checklist;
-pub mod compose;
-mod core;
-pub mod dkim;
-pub mod identity;
+// The module tree is the shape of the thing: one group per case, plus the
+// always-on foundation and the built-in inspector.
+//
+// - `shared`  — reusable by everything (vocabulary, DKIM keys, compose)
+// - `inspect` — the built-in inspector (probe the world, judge it)
+// - `send`    — the outbound engine                    (feature `send`)
+// - `server`  — accept, spool, deliver — implies send  (feature `server`)
+// - `cli`     — the operator console behind the binary (feature `cli`)
 pub mod inspect;
-pub mod probe;
-pub mod sheet;
+pub mod shared;
 
-// `send` — the outbound engine.
 #[cfg(feature = "send")]
-pub mod out;
+pub mod send;
 
-// `server` — accept, spool, deliver. (Implies `send`.)
 #[cfg(feature = "server")]
-pub mod inbound;
-#[cfg(feature = "server")]
-pub mod policy;
-#[cfg(feature = "server")]
-pub mod route;
-#[cfg(feature = "server")]
-pub mod serve;
-#[cfg(feature = "server")]
-pub mod spool;
-#[cfg(feature = "server")]
-pub mod store;
-#[cfg(feature = "server")]
-pub mod worker;
+pub mod server;
 
-// `cli` — the interactive console behind the binary.
 #[cfg(feature = "cli")]
-pub mod console;
+pub mod cli;
 
-// `core` stays private; its public vocabulary is surfaced at the crate root.
-pub use crate::core::config;
-pub use crate::core::{EmailAddress, Envelope, MailEvent, Message};
+// The most-reached-for vocabulary is surfaced at the crate root, so callers
+// write `mailbourne::Message`, not `mailbourne::shared::core::Message`.
+pub use crate::shared::core::config;
+pub use crate::shared::core::{EmailAddress, Envelope, MailEvent, Message};
 
 /// The crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

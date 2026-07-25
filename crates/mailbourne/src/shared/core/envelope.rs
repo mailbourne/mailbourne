@@ -3,10 +3,10 @@
 //! During an SMTP conversation, the sender announces `MAIL FROM:<…>` (where
 //! bounces go) and `RCPT TO:<…>` (where to deliver). That pair is the
 //! **envelope**. It is *not* the `From:`/`To:` your mail client shows — those
-//! live inside the [message](crate::core::message) and may legitimately differ
+//! live inside the [message](crate::shared::core::message) and may legitimately differ
 //! (that difference is how BCC and mailing lists work).
 
-use crate::core::address::EmailAddress;
+use crate::shared::core::address::EmailAddress;
 
 /// The SMTP envelope: return path plus recipients.
 #[derive(Debug, Clone)]

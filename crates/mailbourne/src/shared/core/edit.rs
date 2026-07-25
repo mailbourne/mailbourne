@@ -1,13 +1,13 @@
 //! # edit — format-preserving config changes
 //!
 //! Mutating `mailbourne.toml` without destroying the comments or layout the
-//! operator wrote by hand. serde (via [`Config::load`](crate::core::config::Config::load))
+//! operator wrote by hand. serde (via [`Config::load`](crate::shared::core::config::Config::load))
 //! reads; `toml_edit` writes — it keeps every blank line, comment, and key
 //! order in place. Each function takes the TOML *text* and returns the
 //! edited text, so the rules are pure and testable; the caller owns the
 //! file I/O.
 
-use crate::core::config::Mode;
+use crate::shared::core::config::Mode;
 use toml_edit::{DocumentMut, Table, value};
 
 fn mode_str(mode: Mode) -> &'static str {
@@ -94,7 +94,7 @@ pub fn remove_domain(toml: &str, name: &str) -> Result<String, EditError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::Config;
+    use crate::shared::core::config::Config;
 
     const SAMPLE: &str = r#"# my server
 [server]

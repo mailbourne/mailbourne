@@ -6,7 +6,7 @@
 //! `--json` serializes it; a downstream app walks `items` and renders its
 //! own onboarding UI. One engine, many skins.
 
-use crate::checklist::atom::ChecklistItem;
+use crate::inspect::checklist::atom::ChecklistItem;
 
 /// The inspector's complete findings for one domain.
 #[derive(Debug, Clone)]
@@ -22,6 +22,6 @@ impl ChecklistReport {
     pub fn all_green(&self) -> bool {
         self.items
             .iter()
-            .all(|i| i.status == crate::checklist::atom::Status::Pass)
+            .all(|i| i.status == crate::inspect::checklist::atom::Status::Pass)
     }
 }

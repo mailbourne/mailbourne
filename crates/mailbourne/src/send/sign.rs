@@ -7,15 +7,15 @@
 //! and wasn't altered in transit.
 //!
 //! The signature is canonicalization-exact: it covers *these bytes*. That is
-//! why [`crate::core::Message`] is stored raw and never re-serialized.
+//! why [`crate::shared::core::Message`] is stored raw and never re-serialized.
 //!
 //! The cryptography rides [`mail_auth`] (fuzzed, battle-tested) — we never
 //! hand-roll the crypto; this module only owns the ergonomics. Key
 //! *management* (minting a keypair, deriving its record) lives in
-//! [`crate::dkim`], which needs no network stack and is always available.
+//! [`crate::shared::dkim`], which needs no network stack and is always available.
 
-use crate::core::Message;
-use crate::dkim::DkimError;
+use crate::shared::core::Message;
+use crate::shared::dkim::DkimError;
 
 /// Seals `message` with an RSA-SHA256 DKIM signature and returns the
 /// message with its `DKIM-Signature` header prepended.
@@ -69,7 +69,7 @@ pub fn dkim_sign(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkim::{TEST_KEY, TEST_KEY_PKCS8, generate_dkim_keypair};
+    use crate::shared::dkim::{TEST_KEY, TEST_KEY_PKCS8, generate_dkim_keypair};
 
     const LETTER: &[u8] = b"From: alice@us.example\r\n\
 To: bob@fake.mx\r\n\

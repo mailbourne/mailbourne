@@ -17,7 +17,7 @@ pub mod mx;
 pub mod ptr;
 pub mod spf;
 
-use crate::probe::ProbeError;
+use crate::inspect::probe::ProbeError;
 
 /// Fetches all TXT records published at `name`, with each record's
 /// 255-byte chunks joined back into one string (the wire format splits

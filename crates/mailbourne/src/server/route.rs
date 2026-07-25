@@ -10,8 +10,8 @@
 //! mail server) just drains received messages from a channel and does
 //! whatever it likes with them — no trait to implement.
 
-use crate::inbound::session::ReceivedMessage;
-use crate::store::Maildir;
+use crate::server::inbound::session::ReceivedMessage;
+use crate::server::store::Maildir;
 use async_trait::async_trait;
 
 /// How a delivery attempt ended. `Failed` is retryable by the worker.
@@ -44,7 +44,7 @@ pub trait DeliveryTarget: Send + Sync {
 /// closure — no trait to implement:
 ///
 /// ```no_run
-/// # use mailbourne::route::{FnTarget, DeliveryOutcome};
+/// # use mailbourne::server::route::{FnTarget, DeliveryOutcome};
 /// let target = FnTarget::new("my-app", |msg| async move {
 ///     // do anything with msg…
 ///     DeliveryOutcome::Delivered
@@ -143,7 +143,7 @@ impl DeliveryTarget for ChannelTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inbound::session::ReceivedMessage;
+    use crate::server::inbound::session::ReceivedMessage;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

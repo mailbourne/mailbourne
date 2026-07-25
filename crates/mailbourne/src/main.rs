@@ -6,7 +6,7 @@
 //! arrives next.
 
 use clap::{Parser, Subcommand};
-use mailbourne::out::conversation::Outcome;
+use mailbourne::send::conversation::Outcome;
 use mailbourne::{EmailAddress, Envelope};
 
 #[derive(Parser)]
@@ -131,7 +131,7 @@ fn main() {
     let code = match cli.command {
         // Bare `mailbourne` (a human, no subcommand) → the console.
         // Called from the main thread, so the console may `handle.block_on`.
-        None => mailbourne::console::run(runtime.handle(), None),
+        None => mailbourne::cli::console::run(runtime.handle(), None),
         Some(command) => runtime.block_on(run_command(command)),
     };
     std::process::exit(code);
@@ -160,13 +160,13 @@ async fn run_command(command: Command) -> i32 {
                 Ok(config) => config,
                 Err(code) => return code,
             };
-            let overrides = mailbourne::identity::Overrides {
+            let overrides = mailbourne::shared::identity::Overrides {
                 hostname,
                 dkim_domain,
                 dkim_selector,
                 dkim_key,
             };
-            let id = mailbourne::identity::resolve(config.as_ref(), &from, &overrides);
+            let id = mailbourne::shared::identity::resolve(config.as_ref(), &from, &overrides);
             for note in &id.notes {
                 println!("  · {note}");
             }
@@ -174,7 +174,7 @@ async fn run_command(command: Command) -> i32 {
 
             println!("  building message (RFC 5322)…… ✓");
             let mut message =
-                mailbourne::compose::plain_text(&from, &to, &subject, &body, &hostname);
+                mailbourne::shared::compose::plain_text(&from, &to, &subject, &body, &hostname);
 
             match &id.dkim {
                 Some(dkim) => {
@@ -185,7 +185,7 @@ async fn run_command(command: Command) -> i32 {
                             return 2;
                         }
                     };
-                    match mailbourne::out::sign::dkim_sign(
+                    match mailbourne::send::sign::dkim_sign(
                         &message,
                         &dkim.domain,
                         &dkim.selector,
@@ -216,11 +216,11 @@ async fn run_command(command: Command) -> i32 {
                         None => (direct, 25),
                     };
                     println!("  dialing {h}:{p} directly (MX routing skipped)…");
-                    mailbourne::out::send_to_host(&h, p, &hostname, &envelope, &message).await
+                    mailbourne::send::send_to_host(&h, p, &hostname, &envelope, &message).await
                 }
                 None => {
                     println!("  MX routing {}…", to.domain());
-                    mailbourne::out::send(&hostname, &envelope, &message).await
+                    mailbourne::send::send(&hostname, &envelope, &message).await
                 }
             };
 
@@ -291,7 +291,7 @@ fn keygen(selector: &str, domain: Option<&str>, out: &std::path::Path, force: bo
         return 2;
     }
 
-    let pair = match mailbourne::dkim::generate_dkim_keypair() {
+    let pair = match mailbourne::shared::dkim::generate_dkim_keypair() {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("✗ could not mint a keypair: {e}");
@@ -444,7 +444,7 @@ async fn domain_show(name: &str, config_flag: Option<&std::path::Path>) -> i32 {
         return 2;
     };
 
-    let rendered = mailbourne::sheet::render(&sheet, name, &config.server.hostname, ip);
+    let rendered = mailbourne::inspect::sheet::render(&sheet, name, &config.server.hostname, ip);
     println!("\n{}", rendered.text);
     if rendered.to_do == 0 {
         println!("  lovely — nothing to paste; {name} is all sorted. ☕");
@@ -475,7 +475,7 @@ async fn serve_cmd(
             return 2;
         }
     };
-    let store = mailbourne::store::Maildir::at(store_path);
+    let store = mailbourne::server::store::Maildir::at(store_path);
 
     // Receive only for domains registered in / both — never an open relay.
     let hosted: Vec<String> = config
@@ -489,16 +489,16 @@ async fn serve_cmd(
         })
         .map(|d| d.name.clone())
         .collect();
-    let policy: std::sync::Arc<dyn mailbourne::policy::Policy> =
-        std::sync::Arc::new(mailbourne::policy::HostedDomains::new(hosted.clone()));
+    let policy: std::sync::Arc<dyn mailbourne::server::policy::Policy> = std::sync::Arc::new(
+        mailbourne::server::policy::HostedDomains::new(hosted.clone()),
+    );
 
     // For now, one target: the mailbox store. Forward / webhook / queue join
     // this list as routing grows.
-    let targets: mailbourne::serve::Targets =
-        std::sync::Arc::new(vec![
-            std::sync::Arc::new(mailbourne::route::MailboxTarget::new(store))
-                as std::sync::Arc<dyn mailbourne::route::DeliveryTarget>,
-        ]);
+    let targets: mailbourne::server::serve::Targets = std::sync::Arc::new(vec![
+        std::sync::Arc::new(mailbourne::server::route::MailboxTarget::new(store))
+            as std::sync::Arc<dyn mailbourne::server::route::DeliveryTarget>,
+    ]);
 
     println!(
         "☕ mailbourne — serving {} on {addr}",
@@ -521,7 +521,7 @@ async fn serve_cmd(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("spool");
-    match mailbourne::serve::run(
+    match mailbourne::server::serve::run(
         addr,
         config.server.hostname.clone(),
         policy,

@@ -11,8 +11,8 @@
 //! ends **only** on an exact `\r\n.\r\n` — bare-LF ambiguity never
 //! terminates, which is the SMTP-smuggling defense.
 
-use crate::inbound::command::{self, SmtpCommand};
-use crate::policy::{Policy, Verdict};
+use crate::server::inbound::command::{self, SmtpCommand};
+use crate::server::policy::{Policy, Verdict};
 use async_trait::async_trait;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -303,7 +303,7 @@ mod tests {
     #[tokio::test]
     async fn a_whole_transaction_yields_the_message() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
             serve(server, "mail.test", &policy, &AcceptAll)
                 .await
@@ -342,7 +342,7 @@ mod tests {
         // The never-lose contract at the wire: if the durable sink refuses
         // the message, the client must hear 451 (retry later), never a 250.
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
             serve(server, "mail.test", &policy, &RejectAll)
                 .await
@@ -374,7 +374,7 @@ mod tests {
     #[tokio::test]
     async fn commands_out_of_order_earn_503() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
             serve(server, "mail.test", &policy, &AcceptAll)
                 .await
@@ -403,7 +403,7 @@ mod tests {
         // The open-relay defense: we host mail.test, so mail for
         // somewhere-else.com must be rejected, and nothing gets accepted.
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
             serve(server, "mail.test", &policy, &AcceptAll)
                 .await
@@ -429,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn the_null_sender_is_accepted_for_bounces() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
             serve(server, "mail.test", &policy, &AcceptAll)
                 .await
@@ -459,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn dot_stuffing_is_reversed_in_the_body() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
             serve(server, "mail.test", &policy, &AcceptAll)
                 .await
@@ -492,7 +492,7 @@ mod tests {
     #[tokio::test]
     async fn one_session_can_carry_two_messages() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
             serve(server, "mail.test", &policy, &AcceptAll)
                 .await

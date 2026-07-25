@@ -11,10 +11,10 @@
 //! (from the spool) means a message stored but not yet forwarded won't be
 //! stored twice on retry.
 
-use crate::inbound::session::ReceivedMessage;
-use crate::out::retry::Policy;
-use crate::route::{DeliveryOutcome, DeliveryTarget};
-use crate::spool::{Spool, SpoolError};
+use crate::send::retry::Policy;
+use crate::server::inbound::session::ReceivedMessage;
+use crate::server::route::{DeliveryOutcome, DeliveryTarget};
+use crate::server::spool::{Spool, SpoolError};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,7 +82,7 @@ pub async fn tick(
 }
 
 /// Runs the worker forever, ticking every [`POLL_INTERVAL`].
-pub async fn run(spool: Spool, targets: crate::serve::Targets, retry: Policy) {
+pub async fn run(spool: Spool, targets: crate::server::serve::Targets, retry: Policy) {
     loop {
         let now = now_unix();
         // Errors here are transient (a disk hiccup); the next tick retries.
@@ -102,7 +102,7 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::route::FnTarget;
+    use crate::server::route::FnTarget;
 
     fn temp() -> std::path::PathBuf {
         // Nanos + a per-process counter so parallel tests never share a dir.
