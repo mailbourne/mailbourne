@@ -17,6 +17,9 @@
 
 pub mod address;
 pub mod config;
+// Config *mutation* (domain add/remove/mode edits) is only ever driven by the
+// interactive console — keep it out of lean library builds.
+#[cfg(feature = "cli")]
 pub mod edit;
 pub mod envelope;
 pub mod event;

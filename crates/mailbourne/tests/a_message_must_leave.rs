@@ -1,6 +1,7 @@
 //! The whole outbound journey, end to end, over a real TCP socket:
 //! route → dial → conversation → outcome. The only fake is the server on
 //! the other end — everything of ours is the production path.
+#![cfg(feature = "send")]
 
 use mailbourne::out::conversation::Outcome;
 use mailbourne::{EmailAddress, Envelope, Message};
