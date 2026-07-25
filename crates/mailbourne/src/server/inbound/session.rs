@@ -14,7 +14,65 @@
 use crate::server::inbound::command::{self, SmtpCommand};
 use crate::server::policy::{Policy, Verdict};
 use async_trait::async_trait;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
+
+/// A server connection that may be upgraded from plaintext to TLS in place
+/// (STARTTLS). One type, two states — so the session loop keeps a single
+/// stream variable across the upgrade, and the same generic session code
+/// serves both the plaintext and the encrypted phase.
+enum MaybeTls<S> {
+    /// Before STARTTLS — the raw connection.
+    Plain(S),
+    /// After STARTTLS — the encrypted connection (boxed; a TLS stream is big).
+    Tls(Box<TlsStream<S>>),
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for MaybeTls<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            MaybeTls::Tls(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTls<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            MaybeTls::Tls(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_flush(cx),
+            MaybeTls::Tls(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            MaybeTls::Tls(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
 
 /// The most a single command or payload line may be before we refuse it.
 const MAX_LINE: usize = 8_192;
@@ -92,17 +150,19 @@ pub async fn serve<S>(
     our_hostname: &str,
     policy: &dyn Policy,
     commit: &dyn Commit,
+    tls: Option<Arc<TlsAcceptor>>,
 ) -> std::io::Result<Vec<ReceivedMessage>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (read, mut write) = tokio::io::split(stream);
+    let (read, mut write) = tokio::io::split(MaybeTls::Plain(stream));
     let mut reader = BufReader::new(read);
     let mut messages = Vec::new();
 
     reply(&mut write, 220, &format!("{our_hostname} ESMTP mailbourne")).await?;
 
     let mut greeted = false;
+    let mut on_tls = false;
     let mut mail_from: Option<String> = None;
     let mut rcpts: Vec<String> = Vec::new();
 
@@ -127,6 +187,11 @@ where
                 write
                     .write_all(format!("250-SIZE {MAX_MESSAGE}\r\n").as_bytes())
                     .await?;
+                // Offer STARTTLS only when we can do it and aren't already
+                // encrypted — a private line for AUTH and mail.
+                if tls.is_some() && !on_tls {
+                    write.write_all(b"250-STARTTLS\r\n").await?;
+                }
                 write.write_all(b"250 8BITMIME\r\n").await?;
                 write.flush().await?;
             }
@@ -198,7 +263,39 @@ where
                 reply(&mut write, 250, "reset").await?;
             }
             SmtpCommand::Noop => reply(&mut write, 250, "ok").await?,
-            SmtpCommand::StartTls => reply(&mut write, 502, "STARTTLS not available yet").await?,
+            SmtpCommand::StartTls => match &tls {
+                Some(acceptor) if !on_tls => {
+                    // STARTTLS-injection defense (the parser is the perimeter):
+                    // any bytes buffered after the STARTTLS line were pipelined
+                    // in the clear — refuse rather than ever run them post-TLS.
+                    if !reader.buffer().is_empty() {
+                        reply(&mut write, 501, "no pipelining after STARTTLS").await?;
+                        break;
+                    }
+                    reply(&mut write, 220, "ready to start TLS").await?;
+                    // Reunite the halves, run the TLS handshake in place, then
+                    // re-split and carry on over the encrypted stream.
+                    let joined = reader.into_inner().unsplit(write);
+                    let upgraded = match joined {
+                        MaybeTls::Plain(inner) => acceptor
+                            .accept(inner)
+                            .await
+                            .map(|tls| MaybeTls::Tls(Box::new(tls)))
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+                        already_tls => already_tls,
+                    };
+                    let (read, w) = tokio::io::split(upgraded);
+                    reader = BufReader::new(read);
+                    write = w;
+                    on_tls = true;
+                    // RFC 3207: forget everything learned before TLS; the client
+                    // must EHLO again on the encrypted channel.
+                    greeted = false;
+                    mail_from = None;
+                    rcpts.clear();
+                }
+                _ => reply(&mut write, 502, "STARTTLS not available").await?,
+            },
             SmtpCommand::Quit => {
                 reply(&mut write, 221, "goodbye").await?;
                 break;
@@ -323,12 +420,103 @@ mod tests {
         w.flush().await.unwrap();
     }
 
+    /// Reads a full (possibly multiline) reply and returns all of its text.
+    async fn reply_text<R: AsyncBufRead + Unpin>(r: &mut R) -> String {
+        let mut out = String::new();
+        loop {
+            let mut line = String::new();
+            r.read_line(&mut line).await.unwrap();
+            let more = line.as_bytes().get(3) == Some(&b'-');
+            out.push_str(&line);
+            if !more {
+                return out;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn starttls_upgrades_and_carries_a_transaction_over_tls() {
+        use tokio_rustls::TlsConnector;
+        use tokio_rustls::rustls::pki_types::pem::PemObject;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+        use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+
+        // A self-signed cert for mail.test; the server's acceptor uses it and
+        // the client trusts exactly it.
+        let cert = rcgen::generate_simple_self_signed(vec!["mail.test".to_string()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+        let acceptor =
+            Arc::new(crate::server::tls::acceptor_from_pem(&cert_pem, &key_pem).unwrap());
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move {
+            serve(server, "mail.test", &policy, &AcceptAll, Some(acceptor))
+                .await
+                .unwrap()
+        });
+
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut r = BufReader::new(cr);
+        assert_eq!(code(&mut r).await, 220);
+        send(&mut cw, "EHLO client").await;
+        assert!(
+            reply_text(&mut r).await.contains("STARTTLS"),
+            "STARTTLS must be advertised"
+        );
+        send(&mut cw, "STARTTLS").await;
+        assert_eq!(code(&mut r).await, 220, "ready to start TLS");
+
+        // Upgrade the client side too, then re-check everything over TLS.
+        let plain = r.into_inner().unsplit(cw);
+        let mut roots = RootCertStore::empty();
+        for c in CertificateDer::pem_slice_iter(cert_pem.as_bytes()) {
+            roots.add(c.unwrap()).unwrap();
+        }
+        let client_config = ClientConfig::builder_with_provider(std::sync::Arc::new(
+            tokio_rustls::rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let name = ServerName::try_from("mail.test").unwrap();
+        let tls = connector.connect(name, plain).await.unwrap();
+
+        let (tr, mut tw) = tokio::io::split(tls);
+        let mut r = BufReader::new(tr);
+        send(&mut tw, "EHLO client").await;
+        assert_eq!(code(&mut r).await, 250); // re-greet on the encrypted channel
+        send(&mut tw, "MAIL FROM:<a@b.com>").await;
+        assert_eq!(code(&mut r).await, 250);
+        send(&mut tw, "RCPT TO:<bob@mail.test>").await;
+        assert_eq!(code(&mut r).await, 250);
+        send(&mut tw, "DATA").await;
+        assert_eq!(code(&mut r).await, 354);
+        tw.write_all(b"Subject: secure\r\n\r\nhi over tls\r\n.\r\n")
+            .await
+            .unwrap();
+        tw.flush().await.unwrap();
+        assert_eq!(code(&mut r).await, 250);
+        send(&mut tw, "QUIT").await;
+        assert_eq!(code(&mut r).await, 221);
+        drop(tw);
+        drop(r);
+
+        let msgs = task.await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].rcpt_to, vec!["bob@mail.test".to_string()]);
+        assert!(String::from_utf8_lossy(&msgs[0].data).contains("hi over tls"));
+    }
+
     #[tokio::test]
     async fn a_whole_transaction_yields_the_message() {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll)
+            serve(server, "mail.test", &policy, &AcceptAll, None)
                 .await
                 .unwrap()
         });
@@ -367,7 +555,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &RejectAll)
+            serve(server, "mail.test", &policy, &RejectAll, None)
                 .await
                 .unwrap()
         });
@@ -399,7 +587,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll)
+            serve(server, "mail.test", &policy, &AcceptAll, None)
                 .await
                 .unwrap()
         });
@@ -428,7 +616,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll)
+            serve(server, "mail.test", &policy, &AcceptAll, None)
                 .await
                 .unwrap()
         });
@@ -454,7 +642,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll)
+            serve(server, "mail.test", &policy, &AcceptAll, None)
                 .await
                 .unwrap()
         });
@@ -484,7 +672,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll)
+            serve(server, "mail.test", &policy, &AcceptAll, None)
                 .await
                 .unwrap()
         });
@@ -517,7 +705,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll)
+            serve(server, "mail.test", &policy, &AcceptAll, None)
                 .await
                 .unwrap()
         });

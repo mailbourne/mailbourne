@@ -708,6 +708,42 @@ async fn serve_cmd(
             "   (port 25 needs privilege — run with sudo or a cap, or use --port 2525 to try it)"
         );
     }
+    // STARTTLS: a real certificate when configured (needed for clients like
+    // Gmail that verify it), otherwise a self-signed one so encryption still
+    // works out of the box.
+    let tls = match (&config.server.tls_cert, &config.server.tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            match (
+                std::fs::read_to_string(cert_path),
+                std::fs::read_to_string(key_path),
+            ) {
+                (Ok(cert), Ok(key)) => {
+                    match mailbourne::server::tls::acceptor_from_pem(&cert, &key) {
+                        Ok(acceptor) => {
+                            println!("   STARTTLS → on (cert {})", cert_path.display());
+                            Some(std::sync::Arc::new(acceptor))
+                        }
+                        Err(e) => {
+                            eprintln!("   ⚠ STARTTLS off — cert/key didn't load: {e}");
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("   ⚠ STARTTLS off — couldn't read the cert/key files");
+                    None
+                }
+            }
+        }
+        _ => match mailbourne::server::tls::self_signed(&config.server.hostname) {
+            Ok(acceptor) => {
+                println!("   STARTTLS → on (self-signed; set tls_cert/tls_key for a real one)");
+                Some(std::sync::Arc::new(acceptor))
+            }
+            Err(_) => None,
+        },
+    };
+
     // Accepted-but-not-yet-delivered mail lives in a spool beside the maildir.
     let spool_dir = store_path
         .parent()
@@ -722,6 +758,7 @@ async fn serve_cmd(
         config.server.spool_max_bytes,
         store,
         config.server.mailbox_quota_bytes,
+        tls,
     )
     .await
     {

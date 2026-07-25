@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 
 /// Every accepted message is spooled for each of these, by name.
 pub type Targets = Arc<Vec<Arc<dyn DeliveryTarget>>>;
@@ -95,6 +96,7 @@ pub async fn run(
     spool_max_bytes: u64,
     store: Maildir,
     mailbox_quota_bytes: u64,
+    tls: Option<Arc<TlsAcceptor>>,
 ) -> std::io::Result<()> {
     // Cap the waiting room (0 = unlimited). A full spool answers 451, not 250.
     let spool = Spool::with_cap(spool_dir, spool_max_bytes)
@@ -116,6 +118,7 @@ pub async fn run(
         let (stream, _peer) = listener.accept().await?;
         let hostname = hostname.clone();
         let policy = policy.clone();
+        let tls = tls.clone();
         let commit = SpoolCommit {
             spool: spool.clone(),
             target_names: target_names.clone(),
@@ -123,21 +126,23 @@ pub async fn run(
             mailbox_quota: mailbox_quota_bytes,
         };
         tokio::spawn(async move {
-            handle_connection(stream, &hostname, policy.as_ref(), &commit).await;
+            handle_connection(stream, &hostname, policy.as_ref(), &commit, tls).await;
         });
     }
 }
 
 /// Handles one connection: run the SMTP session, committing each accepted
 /// message to the spool (via `commit`) before the `250`. Delivery is the
-/// worker's job, not this task's.
+/// worker's job, not this task's. `tls`, when present, lets the session offer
+/// STARTTLS.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     hostname: &str,
     policy: &dyn Policy,
     commit: &dyn Commit,
+    tls: Option<Arc<TlsAcceptor>>,
 ) {
-    let _ = crate::server::inbound::session::serve(stream, hostname, policy, commit).await;
+    let _ = crate::server::inbound::session::serve(stream, hostname, policy, commit, tls).await;
 }
 
 #[cfg(test)]
@@ -173,7 +178,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
-            handle_connection(stream, "mail.test", &policy, &commit).await;
+            handle_connection(stream, "mail.test", &policy, &commit, None).await;
         });
 
         let envelope = Envelope {

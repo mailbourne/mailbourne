@@ -63,6 +63,14 @@ pub struct ServerConfig {
     /// so nothing is silently lost. Defaults to `0` (unlimited).
     #[serde(default)]
     pub mailbox_quota_bytes: u64,
+    /// Path to the TLS certificate chain (PEM) for STARTTLS. With `tls_key`,
+    /// enables STARTTLS with a real certificate; without them, the server
+    /// falls back to a self-signed one (fine for testing, not for Gmail).
+    #[serde(default)]
+    pub tls_cert: Option<std::path::PathBuf>,
+    /// Path to the TLS private key (PEM) that matches `tls_cert`.
+    #[serde(default)]
+    pub tls_key: Option<std::path::PathBuf>,
 }
 
 /// One mailbox account: an address that really exists, its hashed password
