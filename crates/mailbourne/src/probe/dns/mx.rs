@@ -6,5 +6,5 @@
 //! to the domain's A record (RFC 5321 §5.1); `MX 0 .` ("null MX", RFC 7505)
 //! means "this domain refuses all mail."
 //!
-//! The outbound sender ([`out`](crate::out)'s `route` step) and the inspector's
+//! The outbound sender (`out`'s `route` step) and the inspector's
 //! R1 check both ride this probe — one implementation, two consumers.

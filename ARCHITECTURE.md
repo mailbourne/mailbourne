@@ -6,15 +6,23 @@ email. (It began as a workspace of `mailbourne-*` crates; those are now
 modules — same boundaries, one thing to install and publish.) Read in this
 order:
 
-| Module | One job | Read it to learn |
+Three things are **always present** — the vocabulary, DKIM key management, and
+the built-in inspector — because they're part of what mailbourne *is*.
+Everything else is a cargo feature: `send` (outbound engine), `server`
+(receive + spool + deliver, implies `send`), and `cli` (the binary + console,
+the default). Embed a lean library with
+`default-features = false, features = ["server"]`.
+
+| Module | Feature | One job |
 |---|---|---|
-| `core` | **The vocabulary.** The nouns every other module shares: addresses, envelopes, messages, events, config. | What an email *is* (envelope vs letter — the distinction everything else builds on). |
-| `probe` | **Questions we ask the world.** Read-only checks: DNS lookups, port dials, TLS handshakes, blocklists. Every probe returns typed evidence. | How the outside world sees a mail server. |
-| `out` | **A message must leave.** The outbound journey in numbered steps: sign → route → dial → conversation → queue → retry. | How email actually travels. Read `out/mod.rs` first — the modules are the tutorial. |
-| `inbound` | **A message must arrive.** The server side of SMTP: greet, accept (or refuse) recipients, collect DATA, commit before `250`. | How receiving mirrors sending. |
-| `policy` / `store` / `spool` | **Accept, keep, deliver.** Who we accept mail for (never an open relay), where it lands (Maildir), and the durable queue that guarantees an accepted message is never lost. | How a `250` becomes a promise. |
-| `checklist` | **The judge.** Turns probe evidence into a checklist report (WHAT/WHY/DO/VERIFY/LEARN per item). Returns data; renders nothing. | Why setup fails and how each fix is verified. |
-| `route`, `serve`, `worker` + the crate root | **The face.** Delivery targets (including `FnTarget` for embedding apps), the daemon, the async delivery worker, and the CLI over it all. | How everything composes. |
+| `core` | *always* | **The vocabulary.** The nouns every module shares: addresses, envelopes, messages, events, config. |
+| `dkim` | *always* | **Keys, not signatures.** Mint a keypair; derive its publishable `v=DKIM1;…` record. Pure RSA, no network. |
+| `probe` / `checklist` / `inspect` / `sheet` | *always* | **The built-in inspector.** Ask the world (DNS, TLS, blocklists), judge the evidence into a checklist, render nothing. |
+| `out` | `send` | **A message must leave.** Sign → route → dial → conversation → queue → retry. Read `out/mod.rs` first. |
+| `inbound` | `server` | **A message must arrive.** The server side of SMTP: greet, accept (or refuse), collect DATA, commit before `250`. |
+| `policy` / `store` / `spool` | `server` | **Accept, keep, deliver.** Never an open relay; Maildir; the durable queue that makes a `250` a promise. |
+| `route`, `serve`, `worker` | `server` | **The daemon.** Delivery targets (including `FnTarget` for embedding apps), the acceptor, the async worker. |
+| `console` + crate root | `cli` | **The face.** The interactive console and the CLI over everything. |
 
 Two laws hold everywhere:
 

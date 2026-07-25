@@ -39,7 +39,7 @@ pub async fn domain(config: &Config, name: &str) -> Option<(Sheet, Option<std::n
         .dkim_key
         .as_deref()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|pem| crate::out::sign::public_record_for(&pem).ok());
+        .and_then(|pem| crate::dkim::public_record_for(&pem).ok());
 
     let evidence = Evidence {
         domain_txt,

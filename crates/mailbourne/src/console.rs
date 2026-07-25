@@ -300,7 +300,7 @@ fn rekey_domain(
         return false;
     }
 
-    let pair = match crate::out::sign::generate_dkim_keypair() {
+    let pair = match crate::dkim::generate_dkim_keypair() {
         Ok(p) => p,
         Err(e) => {
             println!("  ✗ couldn't mint a key: {e}");
@@ -595,7 +595,7 @@ fn add_domain(
     let mode_str = ["out", "both", "in"][m];
     let selector = "mb2026";
 
-    let pair = match crate::out::sign::generate_dkim_keypair() {
+    let pair = match crate::dkim::generate_dkim_keypair() {
         Ok(p) => p,
         Err(e) => {
             println!("  ✗ couldn't mint a key: {e}");

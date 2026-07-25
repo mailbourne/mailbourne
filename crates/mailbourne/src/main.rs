@@ -291,7 +291,7 @@ fn keygen(selector: &str, domain: Option<&str>, out: &std::path::Path, force: bo
         return 2;
     }
 
-    let pair = match mailbourne::out::sign::generate_dkim_keypair() {
+    let pair = match mailbourne::dkim::generate_dkim_keypair() {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("✗ could not mint a keypair: {e}");
