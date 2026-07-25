@@ -49,7 +49,7 @@ thiserror = "2"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 hickory-resolver = "0.24"
-rsa = { version = "0.9", features = ["pem"] }
+rsa = { version = "0.9", features = ["pem", "sha2"] }
 rand = "0.8"
 base64 = "0.22"
 # Async runtime — the union of what the enabled modules need.

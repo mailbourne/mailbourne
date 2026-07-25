@@ -15,6 +15,7 @@
 //! - [`worker`] — the async delivery worker
 
 pub mod accounts;
+pub mod acme;
 pub mod forward;
 pub mod inbound;
 pub mod outbound;
