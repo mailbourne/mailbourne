@@ -685,6 +685,11 @@ async fn serve_cmd(
             mailbourne::server::forward::ForwardTarget::new(config.server.hostname.clone(), rules),
         ));
     }
+    // Submission: an authenticated client's mail is DKIM-signed and relayed
+    // to the world through this target (never reached by incoming mail).
+    target_list.push(std::sync::Arc::new(
+        mailbourne::server::outbound::OutboundTarget::new(config.clone()),
+    ));
     let targets: mailbourne::server::serve::Targets = std::sync::Arc::new(target_list);
 
     println!(
@@ -697,6 +702,12 @@ async fn serve_cmd(
     }
     for rule in &config.forwards {
         println!("   forward {} → {}", rule.match_recipient, rule.to);
+    }
+    if !config.accounts.is_empty() {
+        println!(
+            "   submission → {} account(s) may send through this server (AUTH over TLS)",
+            config.accounts.len()
+        );
     }
     if config.server.mailbox_quota_bytes > 0 {
         println!(

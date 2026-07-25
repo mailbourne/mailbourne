@@ -132,7 +132,15 @@ impl CommitReject {
 pub trait Commit: Send + Sync {
     /// Durably record one accepted message. `Ok` → the session answers
     /// `250`; `Err(reject)` → it answers `reject.code` (a `4xx`).
-    async fn commit(&self, message: &ReceivedMessage) -> Result<(), CommitReject>;
+    ///
+    /// `authenticated` names the logged-in account when the message is a
+    /// **submission** (a client sending *through* us): such mail is relayed
+    /// outbound, not delivered locally. `None` is ordinary incoming mail.
+    async fn commit(
+        &self,
+        message: &ReceivedMessage,
+        authenticated: Option<&str>,
+    ) -> Result<(), CommitReject>;
 }
 
 /// Verifies SMTP AUTH logins. The account registry implements it; the seam
@@ -259,14 +267,21 @@ where
                     reply(&mut write, 452, "too many recipients").await?;
                     continue;
                 }
-                // Acceptance decision: only mail we host (never an open relay).
-                match policy.accept_recipient(&addr) {
-                    Verdict::Accept => {
-                        rcpts.push(addr);
-                        reply(&mut write, 250, "recipient ok").await?;
-                    }
-                    Verdict::Reject(code, msg) => {
-                        reply(&mut write, code, &msg).await?;
+                // An authenticated client may send anywhere (submission — not
+                // an open relay, they proved who they are). Otherwise apply
+                // policy: only mail we host.
+                if authenticated.is_some() {
+                    rcpts.push(addr);
+                    reply(&mut write, 250, "recipient ok").await?;
+                } else {
+                    match policy.accept_recipient(&addr) {
+                        Verdict::Accept => {
+                            rcpts.push(addr);
+                            reply(&mut write, 250, "recipient ok").await?;
+                        }
+                        Verdict::Reject(code, msg) => {
+                            reply(&mut write, code, &msg).await?;
+                        }
                     }
                 }
             }
@@ -286,7 +301,7 @@ where
                         // Durably record BEFORE promising acceptance. If the
                         // sink can't take it, we answer its code (try again) —
                         // never a 250 for mail we didn't persist.
-                        match commit.commit(&message).await {
+                        match commit.commit(&message, authenticated.as_deref()).await {
                             Ok(()) => {
                                 messages.push(message);
                                 reply(&mut write, 250, "message accepted for delivery").await?;
@@ -518,7 +533,11 @@ mod tests {
     struct AcceptAll;
     #[async_trait]
     impl Commit for AcceptAll {
-        async fn commit(&self, _message: &ReceivedMessage) -> Result<(), CommitReject> {
+        async fn commit(
+            &self,
+            _message: &ReceivedMessage,
+            _authenticated: Option<&str>,
+        ) -> Result<(), CommitReject> {
             Ok(())
         }
     }
@@ -527,7 +546,11 @@ mod tests {
     struct RejectAll;
     #[async_trait]
     impl Commit for RejectAll {
-        async fn commit(&self, _message: &ReceivedMessage) -> Result<(), CommitReject> {
+        async fn commit(
+            &self,
+            _message: &ReceivedMessage,
+            _authenticated: Option<&str>,
+        ) -> Result<(), CommitReject> {
             Err(CommitReject::new(451, "disk full"))
         }
     }
@@ -881,6 +904,128 @@ mod tests {
         fn verify(&self, username: &str, password: &str) -> bool {
             username == "bob@mail.test" && password == "hunter2"
         }
+    }
+
+    /// A commit that records whether each message arrived authenticated.
+    struct RecordAuth(std::sync::Arc<std::sync::Mutex<Vec<bool>>>);
+    #[async_trait]
+    impl Commit for RecordAuth {
+        async fn commit(
+            &self,
+            _message: &ReceivedMessage,
+            authenticated: Option<&str>,
+        ) -> Result<(), CommitReject> {
+            self.0.lock().unwrap().push(authenticated.is_some());
+            Ok(())
+        }
+    }
+
+    /// Establishes a TLS+authenticated client over a fresh session and returns
+    /// the encrypted client halves plus the server task. Used by submission
+    /// tests to skip the STARTTLS/AUTH boilerplate.
+    async fn logged_in_session(
+        policy: crate::server::policy::HostedDomains,
+        commit_record: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    ) -> (
+        impl AsyncWriteExt + Unpin,
+        BufReader<impl AsyncRead + Unpin>,
+        tokio::task::JoinHandle<Vec<ReceivedMessage>>,
+    ) {
+        use tokio_rustls::TlsConnector;
+        use tokio_rustls::rustls::pki_types::pem::PemObject;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+        use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["mail.test".to_string()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+        let acceptor =
+            Arc::new(crate::server::tls::acceptor_from_pem(&cert_pem, &key_pem).unwrap());
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            let commit = RecordAuth(commit_record);
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &commit,
+                Some(acceptor),
+                Some(Arc::new(TestAuth)),
+            )
+            .await
+            .unwrap()
+        });
+
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut r = BufReader::new(cr);
+        assert_eq!(code(&mut r).await, 220);
+        send(&mut cw, "EHLO c").await;
+        reply_text(&mut r).await;
+        send(&mut cw, "STARTTLS").await;
+        assert_eq!(code(&mut r).await, 220);
+
+        let plain = r.into_inner().unsplit(cw);
+        let mut roots = RootCertStore::empty();
+        for c in CertificateDer::pem_slice_iter(cert_pem.as_bytes()) {
+            roots.add(c.unwrap()).unwrap();
+        }
+        let client_config = ClientConfig::builder_with_provider(std::sync::Arc::new(
+            tokio_rustls::rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let tls = connector
+            .connect(ServerName::try_from("mail.test").unwrap(), plain)
+            .await
+            .unwrap();
+        let (tr, mut tw) = tokio::io::split(tls);
+        let mut r = BufReader::new(tr);
+        send(&mut tw, "EHLO c").await;
+        reply_text(&mut r).await;
+        send(
+            &mut tw,
+            &format!("AUTH PLAIN {}", b64("\0bob@mail.test\0hunter2")),
+        )
+        .await;
+        assert_eq!(code(&mut r).await, 235);
+        (tw, r, task)
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_client_may_submit_to_a_foreign_recipient() {
+        // far.test is NOT hosted — a stranger could never send to it, but a
+        // logged-in user submitting through us can (that's submission), and
+        // the commit is told the message is authenticated.
+        let record = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
+        let (mut tw, mut r, task) = logged_in_session(policy, record.clone()).await;
+
+        send(&mut tw, "MAIL FROM:<bob@mail.test>").await;
+        assert_eq!(code(&mut r).await, 250);
+        send(&mut tw, "RCPT TO:<stranger@far.test>").await;
+        assert_eq!(code(&mut r).await, 250, "submission may go anywhere");
+        send(&mut tw, "DATA").await;
+        assert_eq!(code(&mut r).await, 354);
+        tw.write_all(b"Subject: out\r\n\r\nbye\r\n.\r\n")
+            .await
+            .unwrap();
+        tw.flush().await.unwrap();
+        assert_eq!(code(&mut r).await, 250);
+        send(&mut tw, "QUIT").await;
+        code(&mut r).await;
+        drop(tw);
+        drop(r);
+        task.await.unwrap();
+
+        assert_eq!(
+            *record.lock().unwrap(),
+            vec![true],
+            "commit saw an authenticated submission"
+        );
     }
 
     #[tokio::test]

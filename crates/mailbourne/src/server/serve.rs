@@ -45,25 +45,37 @@ struct SpoolCommit {
 
 #[async_trait]
 impl Commit for SpoolCommit {
-    async fn commit(&self, message: &ReceivedMessage) -> Result<(), CommitReject> {
-        // Inbox quota: refuse before 250 if any recipient's mailbox is full,
-        // so spam or a neglected mailbox can't silently swallow new mail.
-        if self.mailbox_quota > 0 {
-            for rcpt in &message.rcpt_to {
-                if self.store.size(rcpt).await + message.data.len() as u64 > self.mailbox_quota {
-                    return Err(CommitReject::new(
-                        452,
-                        format!("mailbox for {rcpt} is full, try again later"),
-                    ));
+    async fn commit(
+        &self,
+        message: &ReceivedMessage,
+        authenticated: Option<&str>,
+    ) -> Result<(), CommitReject> {
+        // A logged-in client's mail is a submission → relay it outbound.
+        // Ordinary incoming mail goes to the local targets, quota-checked.
+        let targets = if authenticated.is_some() {
+            vec!["outbound".to_string()]
+        } else {
+            // Inbox quota: refuse before 250 if any recipient's mailbox is
+            // full, so spam or a neglected mailbox can't silently swallow mail.
+            if self.mailbox_quota > 0 {
+                for rcpt in &message.rcpt_to {
+                    if self.store.size(rcpt).await + message.data.len() as u64 > self.mailbox_quota
+                    {
+                        return Err(CommitReject::new(
+                            452,
+                            format!("mailbox for {rcpt} is full, try again later"),
+                        ));
+                    }
                 }
             }
-        }
+            self.target_names.clone()
+        };
         self.spool
             .enqueue(
                 &message.mail_from,
                 &message.rcpt_to,
                 &message.data,
-                &self.target_names,
+                &targets,
                 crate::server::worker::now_unix(),
             )
             .await
@@ -103,7 +115,13 @@ pub async fn run(
     let spool = Spool::with_cap(spool_dir, spool_max_bytes)
         .await
         .map_err(std::io::Error::other)?;
-    let target_names: Vec<String> = targets.iter().map(|t| t.name().to_string()).collect();
+    // Local delivery targets — everything except the outbound relay, which
+    // only authenticated submission routes to.
+    let target_names: Vec<String> = targets
+        .iter()
+        .map(|t| t.name().to_string())
+        .filter(|name| name != "outbound")
+        .collect();
 
     // The delivery worker runs alongside the acceptor: it drains the spool to
     // the targets and reschedules failures. Bind first so a bind error is
@@ -281,7 +299,7 @@ mod tests {
             rcpt_to: vec!["bob@mail.test".to_string()],
             data: vec![b'y'; 30],
         };
-        let reject = commit.commit(&full).await.unwrap_err();
+        let reject = commit.commit(&full, None).await.unwrap_err();
         assert_eq!(reject.code, 452, "a full mailbox must be 452, not 250");
 
         // A different, empty mailbox has room.
@@ -290,7 +308,48 @@ mod tests {
             rcpt_to: vec!["alice@mail.test".to_string()],
             data: vec![b'y'; 30],
         };
-        assert!(commit.commit(&ok).await.is_ok());
+        assert!(commit.commit(&ok, None).await.is_ok());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn submission_routes_to_outbound_and_incoming_to_local() {
+        // The heart of step 4: a logged-in sender's mail is queued for the
+        // outbound relay; ordinary incoming mail goes to the local targets.
+        let dir = std::env::temp_dir().join(format!(
+            "mb-route-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let spool = Spool::at(&dir);
+        let commit = SpoolCommit {
+            spool: spool.clone(),
+            target_names: vec!["mailbox".to_string()],
+            store: Maildir::at(dir.join("store")),
+            mailbox_quota: 0,
+        };
+        let msg = ReceivedMessage {
+            mail_from: "bob@ours.test".to_string(),
+            rcpt_to: vec!["stranger@far.test".to_string()],
+            data: b"hi".to_vec(),
+        };
+        commit.commit(&msg, Some("bob@ours.test")).await.unwrap(); // submission
+        commit.commit(&msg, None).await.unwrap(); // incoming
+
+        let mut pendings = Vec::new();
+        for id in spool.list_due(u64::MAX).await.unwrap() {
+            pendings.push(spool.load(&id).await.unwrap().pending);
+        }
+        assert!(
+            pendings.contains(&vec!["outbound".to_string()]),
+            "submission → outbound"
+        );
+        assert!(
+            pendings.contains(&vec!["mailbox".to_string()]),
+            "incoming → local"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

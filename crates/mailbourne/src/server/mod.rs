@@ -17,6 +17,7 @@
 pub mod accounts;
 pub mod forward;
 pub mod inbound;
+pub mod outbound;
 pub mod policy;
 pub mod route;
 pub mod serve;
