@@ -20,4 +20,5 @@ pub mod route;
 pub mod serve;
 pub mod spool;
 pub mod store;
+pub mod webhook;
 pub mod worker;

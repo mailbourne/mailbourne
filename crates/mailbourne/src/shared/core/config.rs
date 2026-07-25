@@ -53,6 +53,11 @@ pub struct ServerConfig {
     /// 1 GiB; `0` means unlimited.
     #[serde(default = "default_spool_max_bytes")]
     pub spool_max_bytes: u64,
+    /// Optional URL to POST every accepted message to (a JSON summary). When
+    /// set, each received message is both stored *and* announced by webhook,
+    /// retried through the spool if the endpoint is down.
+    #[serde(default)]
+    pub webhook_url: Option<String>,
 }
 
 /// One gibibyte — a sane default ceiling for accepted-but-undelivered mail.

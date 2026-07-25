@@ -493,18 +493,28 @@ async fn serve_cmd(
         mailbourne::server::policy::HostedDomains::new(hosted.clone()),
     );
 
-    // For now, one target: the mailbox store. Forward / webhook / queue join
+    // Every accepted message is stored; if a webhook is configured, it's also
+    // announced by HTTP POST (retried through the spool). Forward / queue join
     // this list as routing grows.
-    let targets: mailbourne::server::serve::Targets = std::sync::Arc::new(vec![
-        std::sync::Arc::new(mailbourne::server::route::MailboxTarget::new(store))
-            as std::sync::Arc<dyn mailbourne::server::route::DeliveryTarget>,
-    ]);
+    let mut target_list: Vec<std::sync::Arc<dyn mailbourne::server::route::DeliveryTarget>> =
+        vec![std::sync::Arc::new(
+            mailbourne::server::route::MailboxTarget::new(store),
+        )];
+    if let Some(url) = &config.server.webhook_url {
+        target_list.push(std::sync::Arc::new(
+            mailbourne::server::webhook::WebhookTarget::new(url.clone()),
+        ));
+    }
+    let targets: mailbourne::server::serve::Targets = std::sync::Arc::new(target_list);
 
     println!(
         "☕ mailbourne — serving {} on {addr}",
         config.server.hostname
     );
     println!("   received mail → {}", store_path.display());
+    if let Some(url) = &config.server.webhook_url {
+        println!("   webhook → {url}");
+    }
     if hosted.is_empty() {
         println!("   ⚠ no domains registered to receive (mode in/both) — every recipient");
         println!("     will be refused. add one: mailbourne domain add <name>");
