@@ -9,7 +9,7 @@
 //! (HTML, attachments, MIME trees) will ride `mail-builder`; this exists
 //! so the engine can prove itself end to end with zero ceremony.
 
-use mailbourne_core::{EmailAddress, Message};
+use crate::core::{EmailAddress, Message};
 
 /// Composes a plain-text RFC 5322 message.
 ///

@@ -9,7 +9,7 @@
 //! Pure logic: probes gather the evidence elsewhere; this module only
 //! reasons about it. That's what makes every rule below testable offline.
 
-use mailbourne_core::config::Mode;
+use crate::core::config::Mode;
 
 /// What to do about one record.
 #[derive(Debug, Clone, PartialEq, Eq)]

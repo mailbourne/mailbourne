@@ -11,10 +11,10 @@
 //! (from the spool) means a message stored but not yet forwarded won't be
 //! stored twice on retry.
 
+use crate::inbound::session::ReceivedMessage;
+use crate::out::retry::Policy;
 use crate::route::{DeliveryOutcome, DeliveryTarget};
-use mailbourne_in::session::ReceivedMessage;
-use mailbourne_out::retry::Policy;
-use mailbourne_spool::{Spool, SpoolError};
+use crate::spool::{Spool, SpoolError};
 use std::sync::Arc;
 use std::time::Duration;
 

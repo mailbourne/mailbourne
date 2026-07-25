@@ -10,8 +10,8 @@
 //! returns *notes* alongside the answer: the friendly one-liners the CLI
 //! prints so nothing about the decision is ever silent.
 
-use mailbourne_core::EmailAddress;
-use mailbourne_core::config::{Config, Mode};
+use crate::core::EmailAddress;
+use crate::core::config::{Config, Mode};
 
 /// A resolved DKIM signing identity.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -5,8 +5,8 @@
 //! on disk and the server's facts, and hand back a judged [`Sheet`]. One
 //! implementation, two callers — the CLI and the console can't drift.
 
+use crate::core::config::Config;
 use crate::sheet::{self, Evidence, Sheet};
-use mailbourne_core::config::Config;
 
 /// Gathers live DNS evidence for `name` and builds its judged sheet.
 ///

@@ -23,15 +23,32 @@ default = ["cli"]
 cli = ["dep:clap", "dep:dialoguer", "tokio/rt-multi-thread", "tokio/macros"]
 
 [dependencies]
-mailbourne-core = { path = "../mailbourne-core", version = "0.0.4" }
-mailbourne-out = { path = "../mailbourne-out", version = "0.0.4" }
-mailbourne-in = { path = "../mailbourne-in", version = "0.0.4" }
-mailbourne-policy = { path = "../mailbourne-policy", version = "0.0.4" }
-mailbourne-store = { path = "../mailbourne-store", version = "0.0.4" }
-mailbourne-spool = { path = "../mailbourne-spool", version = "0.0.4" }
-mailbourne-probe = { path = "../mailbourne-probe", version = "0.0.4" }
+# Serialization & config (was mailbourne-core / -spool)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+toml_edit = "0.22"
+thiserror = "2"
+async-trait = "0.1"
+# DNS (was mailbourne-out / -probe)
+hickory-resolver = "0.24"
+# TLS & mail auth — ring backend, vendored & static-musl friendly (was -out)
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
+webpki-roots = "0.26"
+mail-auth = { version = "0.11", default-features = false, features = ["ring", "report", "dns-hickory"] }
+rustls-pki-types = "1"
+# DKIM key *generation* rides RustCrypto's rsa — pure Rust (was -out)
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+base64 = "0.22"
+# Console / CLI (optional — see the `cli` feature)
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"], optional = true }
 dialoguer = { version = "0.11", optional = true }
-tokio = { version = "1", features = ["rt", "net", "sync", "time"] }
-async-trait = "0.1"
+# Async runtime — the union of what the modules need
+tokio = { version = "1", features = ["io-util", "net", "time", "rt", "sync", "fs", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "net", "time", "fs", "rt-multi-thread", "macros"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

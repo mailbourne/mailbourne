@@ -14,7 +14,7 @@
 //! [`home_labels`], [`home_choice`]) is testable without a terminal; the
 //! interactive loop is a thin `dialoguer` shell over it.
 
-use mailbourne_core::config::{Config, Mode};
+use crate::core::config::{Config, Mode};
 
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
@@ -277,7 +277,7 @@ fn domain_screen(
 fn rekey_domain(
     theme: &dialoguer::theme::ColorfulTheme,
     config_path: &std::path::Path,
-    domain: &mailbourne_core::config::DomainConfig,
+    domain: &crate::core::config::DomainConfig,
 ) -> bool {
     use dialoguer::Input;
 
@@ -326,7 +326,7 @@ fn rekey_domain(
 
     let rel_key = format!("keys/{}.pem", domain.name);
     if !rewrite(config_path, |toml| {
-        mailbourne_core::edit::set_domain_dkim(toml, &domain.name, &new_selector, &rel_key)
+        crate::core::edit::set_domain_dkim(toml, &domain.name, &new_selector, &rel_key)
     }) {
         return false;
     }
@@ -353,8 +353,8 @@ fn change_mode(
     config_path: &std::path::Path,
     name: &str,
 ) -> bool {
+    use crate::core::config::Mode;
     use dialoguer::Select;
-    use mailbourne_core::config::Mode;
 
     let modes = [
         "send-only (out)",
@@ -373,7 +373,7 @@ fn change_mode(
     let mode = [Mode::Out, Mode::Both, Mode::In][m];
 
     if rewrite(config_path, |toml| {
-        mailbourne_core::edit::set_domain_mode(toml, name, mode)
+        crate::core::edit::set_domain_mode(toml, name, mode)
     }) {
         println!("  ✓ {name} is now {}.", mode_label(mode));
         if mode == Mode::Out {
@@ -406,7 +406,7 @@ fn remove_domain_flow(
     }
 
     if rewrite(config_path, |toml| {
-        mailbourne_core::edit::remove_domain(toml, name)
+        crate::core::edit::remove_domain(toml, name)
     }) {
         println!("  ✓ removed {name} from the registry.");
         println!("  its SPF / DKIM / DMARC records at your DNS provider are now unused —");
@@ -422,7 +422,7 @@ fn remove_domain_flow(
 #[cfg(feature = "cli")]
 fn rewrite<F>(config_path: &std::path::Path, edit: F) -> bool
 where
-    F: FnOnce(&str) -> Result<String, mailbourne_core::edit::EditError>,
+    F: FnOnce(&str) -> Result<String, crate::core::edit::EditError>,
 {
     let toml = match std::fs::read_to_string(config_path) {
         Ok(t) => t,
@@ -454,9 +454,9 @@ fn send_test(
     config: &Config,
     domain_name: &str,
 ) {
+    use crate::core::{EmailAddress, Envelope};
     use crate::out::conversation::Outcome;
     use dialoguer::Input;
-    use mailbourne_core::{EmailAddress, Envelope};
 
     let to: String = match Input::<String>::with_theme(theme)
         .with_prompt("send a test to (an inbox you can open)")

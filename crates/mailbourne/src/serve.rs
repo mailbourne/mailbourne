@@ -1,23 +1,23 @@
 //! # serve — run mailbourne as a receiving server
 //!
 //! Binds a listener and, for each connection, runs the server-side SMTP
-//! session ([`mailbourne_in`]). An accepted message is written to the durable
+//! session ([`crate::inbound`]). An accepted message is written to the durable
 //! [`Spool`] **before** the session answers `250` — so a crash after `250`
 //! loses nothing — and a background [`worker`](crate::worker) drains the spool
 //! to the delivery targets, retrying failures with backoff. This is the daemon
 //! face of the engine — `mailbourne serve`, and the docker image's default
 //! command.
 //!
-//! Recipients are validated by the [`mailbourne_policy`] layer — only mail
+//! Recipients are validated by the [`crate::policy`] layer — only mail
 //! for domains we host is accepted (never an open relay). The wider policy
 //! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) arrives next.
 
+use crate::inbound::session::{Commit, ReceivedMessage};
+use crate::out::retry::Policy as RetryPolicy;
+use crate::policy::Policy;
 use crate::route::DeliveryTarget;
+use crate::spool::Spool;
 use async_trait::async_trait;
-use mailbourne_in::session::{Commit, ReceivedMessage};
-use mailbourne_out::retry::Policy as RetryPolicy;
-use mailbourne_policy::Policy;
-use mailbourne_spool::Spool;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -105,16 +105,16 @@ async fn handle_connection(
     policy: &dyn Policy,
     commit: &dyn Commit,
 ) {
-    let _ = mailbourne_in::session::serve(stream, hostname, policy, commit).await;
+    let _ = crate::inbound::session::serve(stream, hostname, policy, commit).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{EmailAddress, Envelope, Message};
     use crate::out::conversation::Outcome;
     use crate::route::{ChannelTarget, MailboxTarget};
-    use mailbourne_core::{EmailAddress, Envelope, Message};
-    use mailbourne_store::Maildir;
+    use crate::store::Maildir;
 
     /// Sends one message from our outbound engine to a one-shot listener,
     /// which commits it to a fresh spool; then ticks the worker once so the
@@ -138,7 +138,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let policy = mailbourne_policy::HostedDomains::new(["mail.test".to_string()]);
+            let policy = crate::policy::HostedDomains::new(["mail.test".to_string()]);
             handle_connection(stream, "mail.test", &policy, &commit).await;
         });
 

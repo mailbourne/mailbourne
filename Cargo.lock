@@ -1050,90 +1050,25 @@ name = "mailbourne"
 version = "0.0.4"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "clap",
  "dialoguer",
- "mailbourne-core",
- "mailbourne-in",
- "mailbourne-out",
- "mailbourne-policy",
- "mailbourne-probe",
- "mailbourne-spool",
- "mailbourne-store",
- "tokio",
-]
-
-[[package]]
-name = "mailbourne-core"
-version = "0.0.4"
-dependencies = [
- "serde",
- "thiserror 2.0.19",
- "toml",
- "toml_edit",
-]
-
-[[package]]
-name = "mailbourne-in"
-version = "0.0.4"
-dependencies = [
- "async-trait",
- "mailbourne-policy",
- "tokio",
-]
-
-[[package]]
-name = "mailbourne-inspect"
-version = "0.0.4"
-
-[[package]]
-name = "mailbourne-out"
-version = "0.0.4"
-dependencies = [
- "base64",
  "hickory-resolver 0.24.4",
  "mail-auth",
- "mailbourne-core",
  "rand 0.8.7",
  "rcgen",
  "rsa",
  "rustls",
  "rustls-pki-types",
- "thiserror 2.0.19",
- "tokio",
- "tokio-rustls",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "mailbourne-policy"
-version = "0.0.4"
-
-[[package]]
-name = "mailbourne-probe"
-version = "0.0.4"
-dependencies = [
- "hickory-resolver 0.24.4",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
-name = "mailbourne-spool"
-version = "0.0.4"
-dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
-]
-
-[[package]]
-name = "mailbourne-store"
-version = "0.0.4"
-dependencies = [
- "thiserror 2.0.19",
- "tokio",
+ "tokio-rustls",
+ "toml",
+ "toml_edit",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

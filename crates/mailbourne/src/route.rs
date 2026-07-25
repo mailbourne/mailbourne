@@ -10,9 +10,9 @@
 //! mail server) just drains received messages from a channel and does
 //! whatever it likes with them — no trait to implement.
 
+use crate::inbound::session::ReceivedMessage;
+use crate::store::Maildir;
 use async_trait::async_trait;
-use mailbourne_in::session::ReceivedMessage;
-use mailbourne_store::Maildir;
 
 /// How a delivery attempt ended. `Failed` is retryable by the worker.
 #[derive(Debug)]
@@ -143,7 +143,7 @@ impl DeliveryTarget for ChannelTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailbourne_in::session::ReceivedMessage;
+    use crate::inbound::session::ReceivedMessage;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
