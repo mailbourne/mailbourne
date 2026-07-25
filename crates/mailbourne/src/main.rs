@@ -94,6 +94,40 @@ enum Command {
         /// The term to explain. Omit to list every term.
         term: Option<String>,
     },
+    /// Obtain a real TLS certificate from Let's Encrypt (mailbourne's certbot).
+    Cert {
+        #[command(subcommand)]
+        command: CertCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CertCommand {
+    /// Get a certificate for a domain via the HTTP-01 challenge (needs port 80).
+    Obtain {
+        /// The domain to certify (the server's hostname, e.g. mb.zebflow.com).
+        #[arg(long)]
+        domain: String,
+        /// Contact email for the CA account (optional but recommended).
+        #[arg(long)]
+        email: Option<String>,
+        /// Use the real Let's Encrypt (trusted). Without this, uses STAGING —
+        /// untrusted, but with generous rate limits for testing.
+        #[arg(long)]
+        production: bool,
+        /// Port to answer the HTTP-01 challenge on (Let's Encrypt uses 80).
+        #[arg(long, default_value_t = 80)]
+        http_port: u16,
+        /// Where the long-lived ACME account key lives (created if missing).
+        #[arg(long, default_value = "acme-account.pem")]
+        account_key: std::path::PathBuf,
+        /// Where to write the certificate chain (default: <domain>.crt).
+        #[arg(long)]
+        out_cert: Option<std::path::PathBuf>,
+        /// Where to write the certificate key (default: <domain>.key).
+        #[arg(long)]
+        out_key: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -307,6 +341,127 @@ async fn run_command(command: Command) -> i32 {
         },
         Command::Account { command } => account_cmd(command),
         Command::Explain { term } => explain_cmd(term.as_deref()),
+        Command::Cert { command } => cert_cmd(command).await,
+    }
+}
+
+/// Loads the ACME account key from `path`, creating and saving it if absent.
+fn load_or_create_account(
+    path: &std::path::Path,
+) -> Result<mailbourne::server::acme::account::AccountKey, i32> {
+    use mailbourne::server::acme::account::AccountKey;
+    if path.exists() {
+        let pem = std::fs::read_to_string(path).map_err(|e| {
+            eprintln!("✗ couldn't read {}: {e}", path.display());
+            1
+        })?;
+        AccountKey::from_pem(&pem).map_err(|e| {
+            eprintln!("✗ {e}");
+            2
+        })
+    } else {
+        let account = AccountKey::generate().map_err(|e| {
+            eprintln!("✗ {e}");
+            1
+        })?;
+        let pem = account.to_pem().map_err(|e| {
+            eprintln!("✗ {e}");
+            1
+        })?;
+        if let Err(e) = std::fs::write(path, pem) {
+            eprintln!("✗ couldn't write {}: {e}", path.display());
+            return Err(1);
+        }
+        println!("  created a new ACME account key at {}", path.display());
+        Ok(account)
+    }
+}
+
+/// `mailbourne cert obtain` — mailbourne's own certbot.
+async fn cert_cmd(command: CertCommand) -> i32 {
+    use mailbourne::server::acme::{challenge::Http01Responder, order};
+
+    match command {
+        CertCommand::Obtain {
+            domain,
+            email,
+            production,
+            http_port,
+            account_key,
+            out_cert,
+            out_key,
+        } => {
+            let account = match load_or_create_account(&account_key) {
+                Ok(account) => account,
+                Err(code) => return code,
+            };
+
+            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
+            let responder = match Http01Responder::start(addr).await {
+                Ok(responder) => responder,
+                Err(e) => {
+                    eprintln!("✗ couldn't bind port {http_port} for the challenge: {e}");
+                    eprintln!(
+                        "  port 80 needs privilege — run with sudo, or --http-port for a test."
+                    );
+                    return 1;
+                }
+            };
+
+            let directory = if production {
+                order::LETSENCRYPT_PRODUCTION
+            } else {
+                order::LETSENCRYPT_STAGING
+            };
+            let ca = if production {
+                "Let's Encrypt"
+            } else {
+                "Let's Encrypt STAGING"
+            };
+            println!("  obtaining a certificate for {domain} via {ca}…");
+
+            let cert = match order::obtain(
+                directory,
+                &account,
+                email.as_deref(),
+                &[domain.clone()],
+                &responder,
+            )
+            .await
+            {
+                Ok(cert) => cert,
+                Err(e) => {
+                    eprintln!("✗ {e}");
+                    return 1;
+                }
+            };
+
+            let cert_path =
+                out_cert.unwrap_or_else(|| std::path::PathBuf::from(format!("{domain}.crt")));
+            let key_path =
+                out_key.unwrap_or_else(|| std::path::PathBuf::from(format!("{domain}.key")));
+            if let Err(e) = std::fs::write(&cert_path, &cert.cert_pem) {
+                eprintln!("✗ couldn't write {}: {e}", cert_path.display());
+                return 1;
+            }
+            if let Err(e) = std::fs::write(&key_path, &cert.key_pem) {
+                eprintln!("✗ couldn't write {}: {e}", key_path.display());
+                return 1;
+            }
+
+            println!("✓ certificate → {}", cert_path.display());
+            println!("  key         → {}", key_path.display());
+            if !production {
+                println!(
+                    "  ⚠ this was STAGING — not trusted by clients. add --production for a real one."
+                );
+            }
+            println!("  point mailbourne at it in mailbourne.toml:");
+            println!("    [server]");
+            println!("    tls_cert = \"{}\"", cert_path.display());
+            println!("    tls_key  = \"{}\"", key_path.display());
+            0
+        }
     }
 }
 
