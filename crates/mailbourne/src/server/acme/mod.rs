@@ -17,5 +17,6 @@
 //! proven, so production rate limits are never burned.
 
 pub mod account;
+pub mod challenge;
 pub mod http;
 pub mod order;
