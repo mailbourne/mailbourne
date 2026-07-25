@@ -84,6 +84,32 @@ enum Command {
         #[command(subcommand)]
         command: DomainCommand,
     },
+    /// Manage mailbox accounts (real addresses + passwords).
+    Account {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// Add a mailbox account, prompting for its password.
+    Add {
+        /// The full address, e.g. bob@ours.com.
+        address: String,
+        /// Storage quota in MiB (0 = unlimited).
+        #[arg(long, default_value_t = 0)]
+        quota_mb: u64,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// List the mailbox accounts, one line each.
+    List {
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -274,6 +300,106 @@ async fn run_command(command: Command) -> i32 {
                 force,
             } => keygen(&selector, domain.as_deref(), &out, force),
         },
+        Command::Account { command } => account_cmd(command),
+    }
+}
+
+/// Resolves the path of an existing config (same search as `load_config`),
+/// or `None` if there isn't one to edit.
+fn existing_config_path(flag: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    if let Some(p) = flag {
+        return p.exists().then(|| p.to_path_buf());
+    }
+    if let Some(env) = std::env::var_os("MAILBOURNE_CONFIG") {
+        let p = std::path::PathBuf::from(env);
+        return p.exists().then_some(p);
+    }
+    ["mailbourne.toml", "/var/mailbourne/mailbourne.toml"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+}
+
+/// `mailbourne account add|list`.
+fn account_cmd(command: AccountCommand) -> i32 {
+    match command {
+        AccountCommand::Add {
+            address,
+            quota_mb,
+            config,
+        } => {
+            if EmailAddress::parse(&address).is_err() {
+                eprintln!("✗ an account address must look like someone@somewhere.tld");
+                return 2;
+            }
+            let Some(path) = existing_config_path(config.as_deref()) else {
+                eprintln!(
+                    "✗ no mailbourne.toml found — register a domain first, then add accounts."
+                );
+                return 2;
+            };
+            let password = match dialoguer::Password::new()
+                .with_prompt(format!("Password for {address}"))
+                .with_confirmation("Confirm password", "passwords don't match")
+                .interact()
+            {
+                Ok(password) => password,
+                Err(_) => return 1,
+            };
+            let hash = match mailbourne::server::accounts::hash_password(&password) {
+                Ok(hash) => hash,
+                Err(e) => {
+                    eprintln!("✗ {e}");
+                    return 1;
+                }
+            };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("✗ couldn't read {}: {e}", path.display());
+                    return 1;
+                }
+            };
+            let updated = match mailbourne::shared::core::edit::add_account(
+                &text,
+                &address,
+                &hash,
+                quota_mb * 1024 * 1024,
+            ) {
+                Ok(updated) => updated,
+                Err(e) => {
+                    eprintln!("✗ {e}");
+                    return 2;
+                }
+            };
+            if let Err(e) = std::fs::write(&path, updated) {
+                eprintln!("✗ couldn't write {}: {e}", path.display());
+                return 1;
+            }
+            println!("✓ account {address} added to {}", path.display());
+            println!("  it can receive mail now; once AUTH lands it can send through this server.");
+            0
+        }
+        AccountCommand::List { config } => {
+            let cfg = match require_config(config.as_deref()) {
+                Ok(cfg) => cfg,
+                Err(code) => return code,
+            };
+            if cfg.accounts.is_empty() {
+                println!("no accounts yet — add one: mailbourne account add <address>");
+            } else {
+                for a in &cfg.accounts {
+                    let quota = if a.quota_bytes > 0 {
+                        format!("{} MiB", a.quota_bytes / (1024 * 1024))
+                    } else {
+                        "unlimited".to_string()
+                    };
+                    let status = if a.enabled { "" } else { "  (disabled)" };
+                    println!("  {}   quota {quota}{status}", a.address);
+                }
+            }
+            0
+        }
     }
 }
 
@@ -489,8 +615,12 @@ async fn serve_cmd(
         })
         .map(|d| d.name.clone())
         .collect();
+    // Acceptance knows our mailboxes: hosted domains + real accounts + forward
+    // aliases. A hosted domain with no accounts stays a catch-all.
+    let accounts = mailbourne::server::accounts::Accounts::from_config(&config.accounts);
+    let forward_matches = config.forwards.iter().map(|f| f.match_recipient.clone());
     let policy: std::sync::Arc<dyn mailbourne::server::policy::Policy> = std::sync::Arc::new(
-        mailbourne::server::policy::HostedDomains::new(hosted.clone()),
+        mailbourne::server::policy::Acceptance::new(hosted.clone(), accounts, forward_matches),
     );
 
     // Every accepted message is stored; if a webhook is configured, it's also

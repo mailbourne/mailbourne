@@ -77,6 +77,13 @@ impl Accounts {
         self.lookup(address).is_some_and(|a| a.enabled)
     }
 
+    /// Whether any account belongs to `domain` (lowercased). A hosted domain
+    /// with no accounts stays a catch-all; one *with* accounts is strict.
+    pub fn hosts_domain(&self, domain: &str) -> bool {
+        let suffix = format!("@{}", domain.to_ascii_lowercase());
+        self.entries.iter().any(|a| a.address.ends_with(&suffix))
+    }
+
     /// Verifies an SMTP AUTH login: the account must exist, be enabled, and
     /// the password must match its stored hash.
     pub fn verify(&self, address: &str, password: &str) -> bool {

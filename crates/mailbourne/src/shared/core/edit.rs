@@ -8,7 +8,7 @@
 //! file I/O.
 
 use crate::shared::core::config::Mode;
-use toml_edit::{DocumentMut, Table, value};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 fn mode_str(mode: Mode) -> &'static str {
     match mode {
@@ -40,6 +40,51 @@ pub enum EditError {
     /// No `[[domain]]` block has that name.
     #[error("no domain named {0} in the config")]
     NotFound(String),
+    /// An account with that address already exists.
+    #[error("an account for {0} already exists")]
+    Duplicate(String),
+}
+
+/// Appends an `[[account]]` block, preserving the rest of the file.
+///
+/// # Errors
+/// [`EditError::Parse`] if the text isn't valid TOML, [`EditError::Duplicate`]
+/// if an account with `address` already exists.
+pub fn add_account(
+    toml: &str,
+    address: &str,
+    password_hash: &str,
+    quota_bytes: u64,
+) -> Result<String, EditError> {
+    let mut doc = parse(toml)?;
+    if account_exists(&doc, address) {
+        return Err(EditError::Duplicate(address.to_string()));
+    }
+    let array = doc
+        .as_table_mut()
+        .entry("account")
+        .or_insert(Item::ArrayOfTables(ArrayOfTables::new()))
+        .as_array_of_tables_mut()
+        .ok_or_else(|| EditError::Parse("`account` is not an array of tables".to_string()))?;
+
+    let mut table = Table::new();
+    table["address"] = value(address);
+    table["password_hash"] = value(password_hash);
+    if quota_bytes > 0 {
+        table["quota_bytes"] = value(quota_bytes as i64);
+    }
+    array.push(table);
+    Ok(doc.to_string())
+}
+
+/// Whether an `[[account]]` with `address` is already present.
+fn account_exists(doc: &DocumentMut, address: &str) -> bool {
+    doc.get("account")
+        .and_then(|item| item.as_array_of_tables())
+        .is_some_and(|arr| {
+            arr.iter()
+                .any(|t| t.get("address").and_then(|v| v.as_str()) == Some(address))
+        })
 }
 
 /// Sets a domain's mode, preserving everything else in the file.
@@ -140,6 +185,26 @@ mode = "both"
             d.dkim_key.as_deref(),
             Some(std::path::Path::new("keys/a-2.pem"))
         );
+    }
+
+    #[test]
+    fn add_account_appends_and_refuses_duplicates() {
+        let out = add_account(SAMPLE, "bob@a.example.com", "$argon2id$abc", 2048).unwrap();
+        assert!(out.contains("# my server"), "top comment lost");
+        let cfg = Config::parse_toml(&out).unwrap();
+        let acct = cfg
+            .accounts
+            .iter()
+            .find(|a| a.address == "bob@a.example.com")
+            .expect("account added");
+        assert_eq!(acct.password_hash, "$argon2id$abc");
+        assert_eq!(acct.quota_bytes, 2048);
+        assert!(acct.enabled, "enabled defaults true");
+        // Adding the same address again is refused.
+        assert!(matches!(
+            add_account(&out, "bob@a.example.com", "x", 0),
+            Err(EditError::Duplicate(_))
+        ));
     }
 
     #[test]
