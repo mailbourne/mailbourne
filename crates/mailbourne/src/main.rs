@@ -505,6 +505,15 @@ async fn serve_cmd(
             mailbourne::server::webhook::WebhookTarget::new(url.clone()),
         ));
     }
+    if !config.forwards.is_empty() {
+        let rules = config
+            .forwards
+            .iter()
+            .map(|r| (r.match_recipient.clone(), r.to.clone()));
+        target_list.push(std::sync::Arc::new(
+            mailbourne::server::forward::ForwardTarget::new(config.server.hostname.clone(), rules),
+        ));
+    }
     let targets: mailbourne::server::serve::Targets = std::sync::Arc::new(target_list);
 
     println!(
@@ -514,6 +523,9 @@ async fn serve_cmd(
     println!("   received mail → {}", store_path.display());
     if let Some(url) = &config.server.webhook_url {
         println!("   webhook → {url}");
+    }
+    for rule in &config.forwards {
+        println!("   forward {} → {}", rule.match_recipient, rule.to);
     }
     if hosted.is_empty() {
         println!("   ⚠ no domains registered to receive (mode in/both) — every recipient");

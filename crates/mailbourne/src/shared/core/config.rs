@@ -60,6 +60,22 @@ pub struct ServerConfig {
     pub webhook_url: Option<String>,
 }
 
+/// One forwarding rule: mail for `match` is relayed on to `to`.
+///
+/// ```toml
+/// [[forward]]
+/// match = "bob@ours.com"
+/// to    = "bob@gmail.com"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForwardRule {
+    /// The recipient address to match (the alias we host).
+    #[serde(rename = "match")]
+    pub match_recipient: String,
+    /// Where matching mail is relayed.
+    pub to: String,
+}
+
 /// One gibibyte — a sane default ceiling for accepted-but-undelivered mail.
 fn default_spool_max_bytes() -> u64 {
     1024 * 1024 * 1024
@@ -87,6 +103,9 @@ pub struct Config {
     /// Every domain this server manages.
     #[serde(default, rename = "domain")]
     pub domains: Vec<DomainConfig>,
+    /// Forwarding rules — aliases relayed on to another address.
+    #[serde(default, rename = "forward")]
+    pub forwards: Vec<ForwardRule>,
 }
 
 /// Why a configuration was refused.
