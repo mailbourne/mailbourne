@@ -89,6 +89,11 @@ enum Command {
         #[command(subcommand)]
         command: AccountCommand,
     },
+    /// Explain a mail abbreviation in plain words (STARTTLS, DKIM, SPF, …).
+    Explain {
+        /// The term to explain. Omit to list every term.
+        term: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -301,6 +306,35 @@ async fn run_command(command: Command) -> i32 {
             } => keygen(&selector, domain.as_deref(), &out, force),
         },
         Command::Account { command } => account_cmd(command),
+        Command::Explain { term } => explain_cmd(term.as_deref()),
+    }
+}
+
+/// `mailbourne explain [term]` — plain words for the jargon.
+fn explain_cmd(term: Option<&str>) -> i32 {
+    use mailbourne::shared::glossary;
+    match term {
+        Some(term) => match glossary::describe(term) {
+            Some(entry) => {
+                println!("  {} · {}", entry.abbr, entry.full);
+                println!("  {}", entry.plain);
+                println!("  learn more → {}", glossary::learn_more(entry.abbr));
+                0
+            }
+            None => {
+                eprintln!("✗ no glossary entry for \"{term}\".");
+                eprintln!("  run `mailbourne explain` to see everything I can describe.");
+                2
+            }
+        },
+        None => {
+            println!("mail is full of abbreviations — here's what each means:\n");
+            for entry in glossary::all() {
+                println!("  {:<9} {}", entry.abbr, entry.full);
+            }
+            println!("\nexplain any of them: mailbourne explain <term>");
+            0
+        }
     }
 }
 

@@ -8,8 +8,10 @@
 //! - [`dkim`] — mint a signing keypair, derive its publishable record
 //! - [`compose`] — build a well-formed [`Message`](core::Message)
 //! - [`identity`] — resolve a domain's signing identity from config
+//! - [`glossary`] — plain-English descriptions for the jargon (SMTP, DKIM, …)
 
 pub mod compose;
 pub mod core;
 pub mod dkim;
+pub mod glossary;
 pub mod identity;
