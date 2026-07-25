@@ -94,6 +94,14 @@ impl Accounts {
     }
 }
 
+/// The account registry is the server's authenticator: an SMTP AUTH login
+/// succeeds exactly when it names an active account with the right password.
+impl crate::server::inbound::session::Authenticator for Accounts {
+    fn verify(&self, username: &str, password: &str) -> bool {
+        Accounts::verify(self, username, password)
+    }
+}
+
 /// Hashes a plaintext password into an Argon2id PHC string, ready to store.
 ///
 /// # Errors

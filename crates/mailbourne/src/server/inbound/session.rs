@@ -14,6 +14,7 @@
 use crate::server::inbound::command::{self, SmtpCommand};
 use crate::server::policy::{Policy, Verdict};
 use async_trait::async_trait;
+use base64::Engine;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -134,6 +135,43 @@ pub trait Commit: Send + Sync {
     async fn commit(&self, message: &ReceivedMessage) -> Result<(), CommitReject>;
 }
 
+/// Verifies SMTP AUTH logins. The account registry implements it; the seam
+/// keeps the session independent of how accounts are stored, and lets tests
+/// hand in a fake.
+pub trait Authenticator: Send + Sync {
+    /// Whether `username` + `password` is a valid, active login.
+    fn verify(&self, username: &str, password: &str) -> bool;
+}
+
+/// Decodes an `AUTH PLAIN` response (`base64(authzid \0 authcid \0 passwd)`)
+/// into `(username, password)`. Returns `None` on malformed input.
+fn decode_plain(b64: &str) -> Option<(String, String)> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .ok()?;
+    let mut parts = bytes.split(|&b| b == 0);
+    let _authzid = parts.next()?;
+    let username = parts.next()?;
+    let password = parts.next()?;
+    Some((
+        String::from_utf8_lossy(username).into_owned(),
+        String::from_utf8_lossy(password).into_owned(),
+    ))
+}
+
+/// Decodes a single base64 `AUTH LOGIN` field into a string.
+fn decode_field(b64: &str) -> Option<String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Base64 for a server challenge (e.g. the `Username:` prompt of AUTH LOGIN).
+fn b64(text: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(text)
+}
+
 /// Runs one SMTP session as the server, returning every message accepted
 /// before the connection ended.
 ///
@@ -151,6 +189,7 @@ pub async fn serve<S>(
     policy: &dyn Policy,
     commit: &dyn Commit,
     tls: Option<Arc<TlsAcceptor>>,
+    auth: Option<Arc<dyn Authenticator>>,
 ) -> std::io::Result<Vec<ReceivedMessage>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -163,6 +202,9 @@ where
 
     let mut greeted = false;
     let mut on_tls = false;
+    // The authenticated account, once AUTH succeeds — the seam submission
+    // (relay-when-logged-in) builds on.
+    let mut authenticated: Option<String> = None;
     let mut mail_from: Option<String> = None;
     let mut rcpts: Vec<String> = Vec::new();
 
@@ -191,6 +233,10 @@ where
                 // encrypted — a private line for AUTH and mail.
                 if tls.is_some() && !on_tls {
                     write.write_all(b"250-STARTTLS\r\n").await?;
+                }
+                // Offer AUTH only over TLS — a password never crosses in clear.
+                if auth.is_some() && on_tls {
+                    write.write_all(b"250-AUTH LOGIN PLAIN\r\n").await?;
                 }
                 write.write_all(b"250 8BITMIME\r\n").await?;
                 write.flush().await?;
@@ -291,11 +337,84 @@ where
                     // RFC 3207: forget everything learned before TLS; the client
                     // must EHLO again on the encrypted channel.
                     greeted = false;
+                    authenticated = None;
                     mail_from = None;
                     rcpts.clear();
                 }
                 _ => reply(&mut write, 502, "STARTTLS not available").await?,
             },
+            SmtpCommand::Auth(arg) => {
+                let authenticator = match &auth {
+                    Some(authenticator) if on_tls && authenticated.is_none() => authenticator,
+                    Some(_) if !on_tls => {
+                        reply(&mut write, 538, "run STARTTLS before AUTH").await?;
+                        continue;
+                    }
+                    Some(_) => {
+                        reply(&mut write, 503, "already authenticated").await?;
+                        continue;
+                    }
+                    None => {
+                        reply(&mut write, 503, "authentication not available").await?;
+                        continue;
+                    }
+                };
+                let (mechanism, initial) = match arg.split_once(' ') {
+                    Some((m, rest)) => (m.to_ascii_uppercase(), Some(rest.trim().to_string())),
+                    None => (arg.to_ascii_uppercase(), None),
+                };
+                let credentials = match mechanism.as_str() {
+                    "PLAIN" => {
+                        let response = match initial {
+                            Some(response) => response,
+                            None => {
+                                reply(&mut write, 334, "").await?;
+                                match read_auth_response(&mut reader).await? {
+                                    Some(response) => response,
+                                    None => {
+                                        reply(&mut write, 501, "authentication cancelled").await?;
+                                        continue;
+                                    }
+                                }
+                            }
+                        };
+                        decode_plain(&response)
+                    }
+                    "LOGIN" => {
+                        reply(&mut write, 334, &b64("Username:")).await?;
+                        let user = match read_auth_response(&mut reader).await? {
+                            Some(user) => user,
+                            None => {
+                                reply(&mut write, 501, "authentication cancelled").await?;
+                                continue;
+                            }
+                        };
+                        reply(&mut write, 334, &b64("Password:")).await?;
+                        let pass = match read_auth_response(&mut reader).await? {
+                            Some(pass) => pass,
+                            None => {
+                                reply(&mut write, 501, "authentication cancelled").await?;
+                                continue;
+                            }
+                        };
+                        match (decode_field(&user), decode_field(&pass)) {
+                            (Some(user), Some(pass)) => Some((user, pass)),
+                            _ => None,
+                        }
+                    }
+                    _ => {
+                        reply(&mut write, 504, "unsupported authentication mechanism").await?;
+                        continue;
+                    }
+                };
+                match credentials {
+                    Some((user, pass)) if authenticator.verify(&user, &pass) => {
+                        authenticated = Some(user);
+                        reply(&mut write, 235, "authentication successful").await?;
+                    }
+                    _ => reply(&mut write, 535, "authentication failed").await?,
+                }
+            }
             SmtpCommand::Quit => {
                 reply(&mut write, 221, "goodbye").await?;
                 break;
@@ -330,6 +449,18 @@ async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<L
         raw.pop();
     }
     Ok(Line::Ok(String::from_utf8_lossy(&raw).into_owned()))
+}
+
+/// Reads one line of an AUTH exchange: `Some(line)` for a response, `None`
+/// when the client cancels (`*`) or the line can't be read.
+async fn read_auth_response<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<Option<String>> {
+    match read_line(reader).await? {
+        Line::Ok(line) if line == "*" => Ok(None),
+        Line::Ok(line) => Ok(Some(line)),
+        Line::TooLong | Line::Ended => Ok(None),
+    }
 }
 
 /// Collects the DATA payload until the exact terminator `\r\n.\r\n`,
@@ -452,9 +583,16 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, Some(acceptor))
-                .await
-                .unwrap()
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                Some(acceptor),
+                None,
+            )
+            .await
+            .unwrap()
         });
 
         let (cr, mut cw) = tokio::io::split(client);
@@ -516,7 +654,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None)
+            serve(server, "mail.test", &policy, &AcceptAll, None, None)
                 .await
                 .unwrap()
         });
@@ -555,7 +693,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &RejectAll, None)
+            serve(server, "mail.test", &policy, &RejectAll, None, None)
                 .await
                 .unwrap()
         });
@@ -587,7 +725,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None)
+            serve(server, "mail.test", &policy, &AcceptAll, None, None)
                 .await
                 .unwrap()
         });
@@ -616,7 +754,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None)
+            serve(server, "mail.test", &policy, &AcceptAll, None, None)
                 .await
                 .unwrap()
         });
@@ -642,7 +780,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None)
+            serve(server, "mail.test", &policy, &AcceptAll, None, None)
                 .await
                 .unwrap()
         });
@@ -672,7 +810,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None)
+            serve(server, "mail.test", &policy, &AcceptAll, None, None)
                 .await
                 .unwrap()
         });
@@ -705,7 +843,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None)
+            serve(server, "mail.test", &policy, &AcceptAll, None, None)
                 .await
                 .unwrap()
         });
@@ -735,5 +873,134 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].data, b"one\r\n");
         assert_eq!(msgs[1].data, b"two\r\n");
+    }
+
+    /// A fixed login for the AUTH tests.
+    struct TestAuth;
+    impl Authenticator for TestAuth {
+        fn verify(&self, username: &str, password: &str) -> bool {
+            username == "bob@mail.test" && password == "hunter2"
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_before_tls_is_refused() {
+        // A password must never cross in the clear: AUTH without TLS earns 538.
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move {
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                None,
+                Some(Arc::new(TestAuth)),
+            )
+            .await
+            .unwrap()
+        });
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut r = BufReader::new(cr);
+        assert_eq!(code(&mut r).await, 220);
+        send(&mut cw, "EHLO c").await;
+        let ehlo = reply_text(&mut r).await;
+        assert!(
+            !ehlo.contains("AUTH"),
+            "AUTH must not be advertised in the clear"
+        );
+        send(
+            &mut cw,
+            &format!("AUTH PLAIN {}", b64("\0bob@mail.test\0hunter2")),
+        )
+        .await;
+        assert_eq!(code(&mut r).await, 538, "STARTTLS required before AUTH");
+        send(&mut cw, "QUIT").await;
+        code(&mut r).await;
+        drop(cw);
+        drop(r);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_plain_over_tls_logs_in_and_rejects_a_wrong_password() {
+        use tokio_rustls::TlsConnector;
+        use tokio_rustls::rustls::pki_types::pem::PemObject;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+        use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["mail.test".to_string()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+        let acceptor =
+            Arc::new(crate::server::tls::acceptor_from_pem(&cert_pem, &key_pem).unwrap());
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
+        let task = tokio::spawn(async move {
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                Some(acceptor),
+                Some(Arc::new(TestAuth)),
+            )
+            .await
+            .unwrap()
+        });
+
+        // Greet, STARTTLS, upgrade the client side.
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut r = BufReader::new(cr);
+        assert_eq!(code(&mut r).await, 220);
+        send(&mut cw, "EHLO c").await;
+        reply_text(&mut r).await;
+        send(&mut cw, "STARTTLS").await;
+        assert_eq!(code(&mut r).await, 220);
+
+        let plain = r.into_inner().unsplit(cw);
+        let mut roots = RootCertStore::empty();
+        for c in CertificateDer::pem_slice_iter(cert_pem.as_bytes()) {
+            roots.add(c.unwrap()).unwrap();
+        }
+        let client_config = ClientConfig::builder_with_provider(std::sync::Arc::new(
+            tokio_rustls::rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let tls = connector
+            .connect(ServerName::try_from("mail.test").unwrap(), plain)
+            .await
+            .unwrap();
+        let (tr, mut tw) = tokio::io::split(tls);
+        let mut r = BufReader::new(tr);
+
+        // Over TLS, AUTH is advertised, a wrong password fails, the right one wins.
+        send(&mut tw, "EHLO c").await;
+        assert!(
+            reply_text(&mut r).await.contains("AUTH"),
+            "AUTH advertised over TLS"
+        );
+        send(
+            &mut tw,
+            &format!("AUTH PLAIN {}", b64("\0bob@mail.test\0wrong")),
+        )
+        .await;
+        assert_eq!(code(&mut r).await, 535, "wrong password rejected");
+        send(
+            &mut tw,
+            &format!("AUTH PLAIN {}", b64("\0bob@mail.test\0hunter2")),
+        )
+        .await;
+        assert_eq!(code(&mut r).await, 235, "correct login accepted");
+        send(&mut tw, "QUIT").await;
+        code(&mut r).await;
+        drop(tw);
+        drop(r);
+        task.await.unwrap();
     }
 }

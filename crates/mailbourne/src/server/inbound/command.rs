@@ -22,6 +22,9 @@ pub enum SmtpCommand {
     Data,
     /// `STARTTLS` — "let's make this private."
     StartTls,
+    /// `AUTH <mechanism> [initial-response]` — "let me log in." The argument
+    /// is everything after `AUTH` (e.g. `PLAIN <base64>` or `LOGIN`).
+    Auth(String),
     /// `RSET` — forget this transaction, start fresh.
     Rset,
     /// `NOOP` — do nothing (a keep-alive).
@@ -51,6 +54,7 @@ pub fn parse(line: &str) -> SmtpCommand {
         "RCPT" => SmtpCommand::RcptTo(extract_path(rest)),
         "DATA" => SmtpCommand::Data,
         "STARTTLS" => SmtpCommand::StartTls,
+        "AUTH" => SmtpCommand::Auth(rest.to_string()),
         "RSET" => SmtpCommand::Rset,
         "NOOP" => SmtpCommand::Noop,
         "QUIT" => SmtpCommand::Quit,
@@ -132,6 +136,15 @@ mod tests {
         assert_eq!(parse("STARTTLS"), SmtpCommand::StartTls);
         assert_eq!(parse("RSET"), SmtpCommand::Rset);
         assert_eq!(parse("NOOP"), SmtpCommand::Noop);
+    }
+
+    #[test]
+    fn auth_keeps_its_mechanism_and_initial_response() {
+        assert_eq!(
+            parse("AUTH PLAIN dGVzdA=="),
+            SmtpCommand::Auth("PLAIN dGVzdA==".into())
+        );
+        assert_eq!(parse("AUTH LOGIN"), SmtpCommand::Auth("LOGIN".into()));
     }
 
     #[test]

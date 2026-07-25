@@ -13,7 +13,7 @@
 //! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) arrives next.
 
 use crate::send::retry::Policy as RetryPolicy;
-use crate::server::inbound::session::{Commit, CommitReject, ReceivedMessage};
+use crate::server::inbound::session::{Authenticator, Commit, CommitReject, ReceivedMessage};
 use crate::server::policy::Policy;
 use crate::server::route::DeliveryTarget;
 use crate::server::spool::Spool;
@@ -97,6 +97,7 @@ pub async fn run(
     store: Maildir,
     mailbox_quota_bytes: u64,
     tls: Option<Arc<TlsAcceptor>>,
+    auth: Option<Arc<dyn Authenticator>>,
 ) -> std::io::Result<()> {
     // Cap the waiting room (0 = unlimited). A full spool answers 451, not 250.
     let spool = Spool::with_cap(spool_dir, spool_max_bytes)
@@ -119,6 +120,7 @@ pub async fn run(
         let hostname = hostname.clone();
         let policy = policy.clone();
         let tls = tls.clone();
+        let auth = auth.clone();
         let commit = SpoolCommit {
             spool: spool.clone(),
             target_names: target_names.clone(),
@@ -126,7 +128,7 @@ pub async fn run(
             mailbox_quota: mailbox_quota_bytes,
         };
         tokio::spawn(async move {
-            handle_connection(stream, &hostname, policy.as_ref(), &commit, tls).await;
+            handle_connection(stream, &hostname, policy.as_ref(), &commit, tls, auth).await;
         });
     }
 }
@@ -141,8 +143,10 @@ async fn handle_connection(
     policy: &dyn Policy,
     commit: &dyn Commit,
     tls: Option<Arc<TlsAcceptor>>,
+    auth: Option<Arc<dyn Authenticator>>,
 ) {
-    let _ = crate::server::inbound::session::serve(stream, hostname, policy, commit, tls).await;
+    let _ =
+        crate::server::inbound::session::serve(stream, hostname, policy, commit, tls, auth).await;
 }
 
 #[cfg(test)]
@@ -178,7 +182,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
-            handle_connection(stream, "mail.test", &policy, &commit, None).await;
+            handle_connection(stream, "mail.test", &policy, &commit, None, None).await;
         });
 
         let envelope = Envelope {

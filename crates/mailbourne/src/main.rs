@@ -652,6 +652,13 @@ async fn serve_cmd(
     // Acceptance knows our mailboxes: hosted domains + real accounts + forward
     // aliases. A hosted domain with no accounts stays a catch-all.
     let accounts = mailbourne::server::accounts::Accounts::from_config(&config.accounts);
+    // The same registry authenticates SMTP AUTH logins (offered only over TLS).
+    let auth: Option<std::sync::Arc<dyn mailbourne::server::inbound::session::Authenticator>> =
+        if accounts.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(accounts.clone()))
+        };
     let forward_matches = config.forwards.iter().map(|f| f.match_recipient.clone());
     let policy: std::sync::Arc<dyn mailbourne::server::policy::Policy> = std::sync::Arc::new(
         mailbourne::server::policy::Acceptance::new(hosted.clone(), accounts, forward_matches),
@@ -759,6 +766,7 @@ async fn serve_cmd(
         store,
         config.server.mailbox_quota_bytes,
         tls,
+        auth,
     )
     .await
     {
