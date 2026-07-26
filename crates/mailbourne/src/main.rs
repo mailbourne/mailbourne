@@ -89,6 +89,16 @@ enum Command {
         #[command(subcommand)]
         command: AccountCommand,
     },
+    /// Inspect and change server-wide settings (the door, TLS, limits).
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
+    /// Manage forwarding rules (relay an address on to somewhere else).
+    Forward {
+        #[command(subcommand)]
+        command: ForwardCommand,
+    },
     /// Explain a mail abbreviation in plain words (STARTTLS, DKIM, SPF, …).
     Explain {
         /// The term to explain. Omit to list every term.
@@ -132,10 +142,14 @@ enum CertCommand {
 
 #[derive(Subcommand)]
 enum AccountCommand {
-    /// Add a mailbox account, prompting for its password.
+    /// Add a mailbox account. Pass --password to run unattended (for scripts
+    /// and automation); omit it to be prompted interactively.
     Add {
         /// The full address, e.g. bob@ours.com.
         address: String,
+        /// The account password. Omit for an interactive, hidden prompt.
+        #[arg(long)]
+        password: Option<String>,
         /// Storage quota in MiB (0 = unlimited).
         #[arg(long, default_value_t = 0)]
         quota_mb: u64,
@@ -145,6 +159,25 @@ enum AccountCommand {
     },
     /// List the mailbox accounts, one line each.
     List {
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Remove a mailbox account (its stored mail on disk is left alone).
+    Remove {
+        /// The address to remove.
+        address: String,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Change an account's password. Pass --password to run unattended.
+    Passwd {
+        /// The address whose password to change.
+        address: String,
+        /// The new password. Omit for an interactive, hidden prompt.
+        #[arg(long)]
+        password: Option<String>,
         /// Path to mailbourne.toml (same search order as `send`).
         #[arg(long)]
         config: Option<std::path::PathBuf>,
@@ -163,6 +196,126 @@ enum DomainCommand {
         config: Option<std::path::PathBuf>,
     },
     /// Every managed domain, one line each.
+    List {
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Register a new domain: mint its DKIM key and add it to the config.
+    Add {
+        /// The domain name, e.g. news.example.com.
+        name: String,
+        /// Direction: out (send only), in (receive only), or both.
+        #[arg(long, default_value = "out")]
+        mode: String,
+        /// DKIM selector (the name before ._domainkey).
+        #[arg(long, default_value = "mb2026")]
+        selector: String,
+        /// Register an existing key at this path instead of minting one.
+        #[arg(long)]
+        dkim_key: Option<std::path::PathBuf>,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Change a domain's direction (out / in / both).
+    SetMode {
+        /// The domain (must be in the registry).
+        name: String,
+        /// The new direction: out, in, or both.
+        #[arg(long)]
+        mode: String,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Rotate a domain's DKIM key: mint a new one under a NEW selector.
+    Rekey {
+        /// The domain (must be in the registry).
+        name: String,
+        /// A fresh selector, distinct from the current one.
+        #[arg(long)]
+        selector: String,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Remove a domain from the registry (its key file stays on disk).
+    Remove {
+        /// The domain to remove.
+        name: String,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCommand {
+    /// Show the server settings: the door, TLS, submission, spool + quota.
+    Show {
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Change server settings. Provide any of the flags; each is applied.
+    Set {
+        /// The server's own name (EHLO / PTR / TLS cert name).
+        #[arg(long)]
+        hostname: Option<String>,
+        /// Reject incoming mail that fails DMARC when the sender publishes
+        /// p=reject (true), or only annotate it (false).
+        #[arg(long)]
+        dmarc_enforce: Option<bool>,
+        /// Per-mailbox quota in MiB (0 = unlimited).
+        #[arg(long)]
+        mailbox_quota_mb: Option<u64>,
+        /// Spool ceiling in MiB (0 = unlimited).
+        #[arg(long)]
+        spool_max_mb: Option<u64>,
+        /// URL to POST every accepted message to.
+        #[arg(long)]
+        webhook: Option<String>,
+        /// Remove the webhook URL.
+        #[arg(long)]
+        clear_webhook: bool,
+        /// Path to the TLS certificate chain (PEM) for STARTTLS.
+        #[arg(long)]
+        tls_cert: Option<std::path::PathBuf>,
+        /// Path to the TLS private key (PEM) matching tls_cert.
+        #[arg(long)]
+        tls_key: Option<std::path::PathBuf>,
+        /// Remove the configured cert/key (fall back to self-signed).
+        #[arg(long)]
+        clear_tls: bool,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ForwardCommand {
+    /// Add a rule: mail for <alias> is relayed on to --to.
+    Add {
+        /// The address we host that should be forwarded.
+        alias: String,
+        /// Where matching mail is relayed.
+        #[arg(long)]
+        to: String,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Remove a forwarding rule by its matched alias.
+    Remove {
+        /// The alias whose rule to remove.
+        alias: String,
+        /// Path to mailbourne.toml (same search order as `send`).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// List the forwarding rules, one line each.
     List {
         /// Path to mailbourne.toml (same search order as `send`).
         #[arg(long)]
@@ -330,6 +483,28 @@ async fn run_command(command: Command) -> i32 {
         Command::Domain { command } => match command {
             DomainCommand::Show { name, config } => domain_show(&name, config.as_deref()).await,
             DomainCommand::List { config } => domain_list(config.as_deref()),
+            DomainCommand::Add {
+                name,
+                mode,
+                selector,
+                dkim_key,
+                config,
+            } => domain_add(
+                &name,
+                &mode,
+                &selector,
+                dkim_key.as_deref(),
+                config.as_deref(),
+            ),
+            DomainCommand::SetMode { name, mode, config } => {
+                domain_set_mode(&name, &mode, config.as_deref())
+            }
+            DomainCommand::Rekey {
+                name,
+                selector,
+                config,
+            } => domain_rekey(&name, &selector, config.as_deref()),
+            DomainCommand::Remove { name, config } => domain_remove(&name, config.as_deref()),
         },
         Command::Dns { command } => match command {
             DnsCommand::Keygen {
@@ -340,8 +515,54 @@ async fn run_command(command: Command) -> i32 {
             } => keygen(&selector, domain.as_deref(), &out, force),
         },
         Command::Account { command } => account_cmd(command),
+        Command::Server { command } => server_cmd(command),
+        Command::Forward { command } => forward_cmd(command),
         Command::Explain { term } => explain_cmd(term.as_deref()),
         Command::Cert { command } => cert_cmd(command).await,
+    }
+}
+
+/// Parses a mode word (`out` / `in` / `both`) for the CLI.
+fn parse_mode(s: &str) -> Option<mailbourne::config::Mode> {
+    use mailbourne::config::Mode;
+    match s {
+        "out" => Some(Mode::Out),
+        "in" => Some(Mode::In),
+        "both" => Some(Mode::Both),
+        _ => None,
+    }
+}
+
+/// Reads the config text, applies a format-preserving edit, writes it back.
+/// Returns a process exit code (0 ok, 2 on a rejected edit or missing file).
+fn edit_config<F>(flag: Option<&std::path::Path>, edit: F) -> i32
+where
+    F: FnOnce(&str) -> Result<String, mailbourne::shared::core::edit::EditError>,
+{
+    let Some(path) = existing_config_path(flag) else {
+        eprintln!("✗ no mailbourne.toml found — nothing is registered yet.");
+        eprintln!("  run `mailbourne` to set one up, or point me at it with --config.");
+        return 2;
+    };
+    let toml = match std::fs::read_to_string(&path) {
+        Ok(toml) => toml,
+        Err(e) => {
+            eprintln!("✗ couldn't read {}: {e}", path.display());
+            return 1;
+        }
+    };
+    match edit(&toml) {
+        Ok(updated) => {
+            if let Err(e) = std::fs::write(&path, updated) {
+                eprintln!("✗ couldn't write {}: {e}", path.display());
+                return 1;
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("✗ {e}");
+            2
+        }
     }
 }
 
@@ -509,11 +730,27 @@ fn existing_config_path(flag: Option<&std::path::Path>) -> Option<std::path::Pat
         .find(|p| p.exists())
 }
 
-/// `mailbourne account add|list`.
+/// Resolves an account password: the `--password` flag if given (unattended,
+/// for scripts and LLMs), otherwise a hidden, confirmed interactive prompt.
+fn resolve_password(provided: Option<String>, address: &str) -> Result<String, i32> {
+    match provided {
+        Some(password) => Ok(password),
+        None => dialoguer::Password::new()
+            .with_prompt(format!("Password for {address}"))
+            .with_confirmation("Confirm password", "passwords don't match")
+            .interact()
+            .map_err(|_| 1),
+    }
+}
+
+/// `mailbourne account add|list|remove|passwd`.
 fn account_cmd(command: AccountCommand) -> i32 {
+    use mailbourne::server::accounts::hash_password;
+    use mailbourne::shared::core::edit;
     match command {
         AccountCommand::Add {
             address,
+            password,
             quota_mb,
             config,
         } => {
@@ -521,53 +758,59 @@ fn account_cmd(command: AccountCommand) -> i32 {
                 eprintln!("✗ an account address must look like someone@somewhere.tld");
                 return 2;
             }
-            let Some(path) = existing_config_path(config.as_deref()) else {
-                eprintln!(
-                    "✗ no mailbourne.toml found — register a domain first, then add accounts."
-                );
-                return 2;
-            };
-            let password = match dialoguer::Password::new()
-                .with_prompt(format!("Password for {address}"))
-                .with_confirmation("Confirm password", "passwords don't match")
-                .interact()
-            {
+            let password = match resolve_password(password, &address) {
                 Ok(password) => password,
-                Err(_) => return 1,
+                Err(code) => return code,
             };
-            let hash = match mailbourne::server::accounts::hash_password(&password) {
+            let hash = match hash_password(&password) {
                 Ok(hash) => hash,
                 Err(e) => {
                     eprintln!("✗ {e}");
                     return 1;
                 }
             };
-            let text = match std::fs::read_to_string(&path) {
-                Ok(text) => text,
+            let quota_bytes = quota_mb * 1024 * 1024;
+            let code = edit_config(config.as_deref(), |toml| {
+                edit::add_account(toml, &address, &hash, quota_bytes)
+            });
+            if code == 0 {
+                println!("✓ account {address} added.");
+                println!("  it can receive mail now, and send through this server over AUTH+TLS.");
+            }
+            code
+        }
+        AccountCommand::Remove { address, config } => {
+            let code = edit_config(config.as_deref(), |toml| {
+                edit::remove_account(toml, &address)
+            });
+            if code == 0 {
+                println!("✓ account {address} removed (any stored mail on disk is untouched).");
+            }
+            code
+        }
+        AccountCommand::Passwd {
+            address,
+            password,
+            config,
+        } => {
+            let password = match resolve_password(password, &address) {
+                Ok(password) => password,
+                Err(code) => return code,
+            };
+            let hash = match hash_password(&password) {
+                Ok(hash) => hash,
                 Err(e) => {
-                    eprintln!("✗ couldn't read {}: {e}", path.display());
+                    eprintln!("✗ {e}");
                     return 1;
                 }
             };
-            let updated = match mailbourne::shared::core::edit::add_account(
-                &text,
-                &address,
-                &hash,
-                quota_mb * 1024 * 1024,
-            ) {
-                Ok(updated) => updated,
-                Err(e) => {
-                    eprintln!("✗ {e}");
-                    return 2;
-                }
-            };
-            if let Err(e) = std::fs::write(&path, updated) {
-                eprintln!("✗ couldn't write {}: {e}", path.display());
-                return 1;
+            let code = edit_config(config.as_deref(), |toml| {
+                edit::set_account_password(toml, &address, &hash)
+            });
+            if code == 0 {
+                println!("✓ password changed for {address}.");
             }
-            println!("✓ account {address} added to {}", path.display());
-            println!("  it can receive mail now; once AUTH lands it can send through this server.");
-            0
+            code
         }
         AccountCommand::List { config } => {
             let cfg = match require_config(config.as_deref()) {
@@ -770,6 +1013,254 @@ async fn domain_show(name: &str, config_flag: Option<&std::path::Path>) -> i32 {
         );
     }
     0
+}
+
+/// `mailbourne domain add` — register a new domain and mint its DKIM key.
+fn domain_add(
+    name: &str,
+    mode: &str,
+    selector: &str,
+    dkim_key: Option<&std::path::Path>,
+    config_flag: Option<&std::path::Path>,
+) -> i32 {
+    use mailbourne::shared::core::edit;
+    let Some(mode) = parse_mode(mode) else {
+        eprintln!("✗ mode must be one of: out, in, both");
+        return 2;
+    };
+    let Some(path) = existing_config_path(config_flag) else {
+        eprintln!("✗ no mailbourne.toml found — run `mailbourne` to set one up first.");
+        return 2;
+    };
+    // Refuse a duplicate before minting a key we'd otherwise orphan.
+    if let Ok(config) = mailbourne::config::Config::load(&path)
+        && config.domain(name).is_some()
+    {
+        eprintln!("✗ {name} is already registered.");
+        return 2;
+    }
+
+    // Either register an existing key path, or mint a fresh one and print its
+    // record. Both go through the same format-preserving edit.
+    let (key_value, record) = match dkim_key {
+        Some(existing) => (existing.display().to_string(), None),
+        None => match mailbourne::cli::actions::mint_domain_key(&path, name, selector) {
+            Ok(minted) => (minted.rel_key, Some(minted.dns_record_value)),
+            Err(e) => {
+                eprintln!("✗ {e}");
+                return 1;
+            }
+        },
+    };
+
+    let code = edit_config(config_flag, |toml| {
+        edit::add_domain(toml, name, mode, selector, &key_value)
+    });
+    if code != 0 {
+        return code;
+    }
+    println!("✓ added {name} ({mode:?}).");
+    match record {
+        Some(value) => {
+            println!("  publish this so {name} can be verified (paste at your DNS provider):");
+            println!("    {selector}._domainkey.{name}   TXT   {value}");
+        }
+        None => {
+            println!("  using existing key {key_value} — make sure its record is published:");
+            println!("    {selector}._domainkey.{name}   TXT   <the public half of that key>");
+        }
+    }
+    0
+}
+
+/// `mailbourne domain set-mode` — change a domain's direction.
+fn domain_set_mode(name: &str, mode: &str, config_flag: Option<&std::path::Path>) -> i32 {
+    use mailbourne::shared::core::edit;
+    let Some(mode) = parse_mode(mode) else {
+        eprintln!("✗ mode must be one of: out, in, both");
+        return 2;
+    };
+    let code = edit_config(config_flag, |toml| edit::set_domain_mode(toml, name, mode));
+    if code == 0 {
+        println!("✓ {name} is now {mode:?}.");
+        if matches!(mode, mailbourne::config::Mode::Out) {
+            println!("  (its MX is left alone — inbound stays with your current provider.)");
+        }
+    }
+    code
+}
+
+/// `mailbourne domain rekey` — rotate a domain's DKIM key under a new selector.
+fn domain_rekey(name: &str, selector: &str, config_flag: Option<&std::path::Path>) -> i32 {
+    use mailbourne::shared::core::edit;
+    let Some(path) = existing_config_path(config_flag) else {
+        eprintln!("✗ no mailbourne.toml found — run `mailbourne` to set one up first.");
+        return 2;
+    };
+    let minted = match mailbourne::cli::actions::mint_domain_key(&path, name, selector) {
+        Ok(minted) => minted,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            return 1;
+        }
+    };
+    let code = edit_config(config_flag, |toml| {
+        edit::set_domain_dkim(toml, name, selector, &minted.rel_key)
+    });
+    if code != 0 {
+        return code;
+    }
+    println!("✓ rotated {name} to selector {selector}.");
+    println!("  publish the NEW record BEFORE the next send, or signing will fail:");
+    println!(
+        "    {selector}._domainkey.{name}   TXT   {}",
+        minted.dns_record_value
+    );
+    println!("  once it verifies, you can delete the old selector's record.");
+    0
+}
+
+/// `mailbourne domain remove` — take a domain out of the registry.
+fn domain_remove(name: &str, config_flag: Option<&std::path::Path>) -> i32 {
+    use mailbourne::shared::core::edit;
+    let code = edit_config(config_flag, |toml| edit::remove_domain(toml, name));
+    if code == 0 {
+        println!("✓ removed {name} (its key file stays in keys/; DNS records go unused).");
+    }
+    code
+}
+
+/// `mailbourne server show|set`.
+fn server_cmd(command: ServerCommand) -> i32 {
+    use mailbourne::shared::core::edit;
+    match command {
+        ServerCommand::Show { config } => {
+            let cfg = match require_config(config.as_deref()) {
+                Ok(cfg) => cfg,
+                Err(code) => return code,
+            };
+            println!();
+            for line in mailbourne::cli::console::server_summary(&cfg) {
+                println!("{line}");
+            }
+            0
+        }
+        ServerCommand::Set {
+            hostname,
+            dmarc_enforce,
+            mailbox_quota_mb,
+            spool_max_mb,
+            webhook,
+            clear_webhook,
+            tls_cert,
+            tls_key,
+            clear_tls,
+            config,
+        } => {
+            // Fold every provided flag into one format-preserving pass over
+            // the text, so a run either applies cleanly or changes nothing.
+            let mut changes: Vec<String> = Vec::new();
+            let code = edit_config(config.as_deref(), |toml| {
+                let mut doc = toml.to_string();
+                if let Some(h) = &hostname {
+                    doc = edit::set_server_string(&doc, "hostname", h)?;
+                    changes.push(format!("hostname = {h}"));
+                }
+                if let Some(v) = dmarc_enforce {
+                    doc = edit::set_server_bool(&doc, "dmarc_enforce", v)?;
+                    changes.push(format!("dmarc_enforce = {v}"));
+                }
+                if let Some(mb) = mailbox_quota_mb {
+                    doc = edit::set_server_int(
+                        &doc,
+                        "mailbox_quota_bytes",
+                        (mb * 1024 * 1024) as i64,
+                    )?;
+                    changes.push(format!("mailbox_quota = {mb} MiB"));
+                }
+                if let Some(mb) = spool_max_mb {
+                    doc = edit::set_server_int(&doc, "spool_max_bytes", (mb * 1024 * 1024) as i64)?;
+                    changes.push(format!("spool_max = {mb} MiB"));
+                }
+                if clear_webhook {
+                    doc = edit::clear_server_field(&doc, "webhook_url")?;
+                    changes.push("webhook cleared".to_string());
+                } else if let Some(url) = &webhook {
+                    doc = edit::set_server_string(&doc, "webhook_url", url)?;
+                    changes.push(format!("webhook = {url}"));
+                }
+                if clear_tls {
+                    doc = edit::clear_server_field(&doc, "tls_cert")?;
+                    doc = edit::clear_server_field(&doc, "tls_key")?;
+                    changes.push("tls cleared (self-signed)".to_string());
+                } else {
+                    if let Some(c) = &tls_cert {
+                        doc = edit::set_server_string(&doc, "tls_cert", &c.display().to_string())?;
+                        changes.push(format!("tls_cert = {}", c.display()));
+                    }
+                    if let Some(k) = &tls_key {
+                        doc = edit::set_server_string(&doc, "tls_key", &k.display().to_string())?;
+                        changes.push(format!("tls_key = {}", k.display()));
+                    }
+                }
+                Ok(doc)
+            });
+            if code == 0 {
+                if changes.is_empty() {
+                    println!(
+                        "nothing to change — pass a flag (see `mailbourne server set --help`)."
+                    );
+                } else {
+                    println!("✓ server updated:");
+                    for change in &changes {
+                        println!("    {change}");
+                    }
+                }
+            }
+            code
+        }
+    }
+}
+
+/// `mailbourne forward add|remove|list`.
+fn forward_cmd(command: ForwardCommand) -> i32 {
+    use mailbourne::shared::core::edit;
+    match command {
+        ForwardCommand::Add { alias, to, config } => {
+            if EmailAddress::parse(&to).is_err() {
+                eprintln!("✗ --to must be a full address like someone@somewhere.tld");
+                return 2;
+            }
+            let code = edit_config(config.as_deref(), |toml| {
+                edit::add_forward(toml, &alias, &to)
+            });
+            if code == 0 {
+                println!("✓ mail for {alias} will be forwarded to {to}.");
+            }
+            code
+        }
+        ForwardCommand::Remove { alias, config } => {
+            let code = edit_config(config.as_deref(), |toml| edit::remove_forward(toml, &alias));
+            if code == 0 {
+                println!("✓ removed the forward for {alias}.");
+            }
+            code
+        }
+        ForwardCommand::List { config } => {
+            let cfg = match require_config(config.as_deref()) {
+                Ok(cfg) => cfg,
+                Err(code) => return code,
+            };
+            if cfg.forwards.is_empty() {
+                println!("no forwards yet — add one: mailbourne forward add <alias> --to <dest>");
+            } else {
+                for f in &cfg.forwards {
+                    println!("  {}  →  {}", f.match_recipient, f.to);
+                }
+            }
+            0
+        }
+    }
 }
 
 /// `mailbourne serve` — run the receiving daemon.

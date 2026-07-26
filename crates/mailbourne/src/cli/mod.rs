@@ -5,5 +5,7 @@
 //! prompts; the engine underneath returns data.
 //!
 //! - [`console`] — the guided setup/status console
+//! - [`actions`] — the filesystem side effects the console and CLI share
 
+pub mod actions;
 pub mod console;

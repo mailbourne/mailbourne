@@ -552,7 +552,7 @@ fn human_bytes(n: u64) -> String {
 /// The server-level settings, rendered as lines — every recent capability made
 /// explicit, each with how to learn about or change it. Pure (no I/O) so it's
 /// testable and reused by `mailbourne server`.
-pub(crate) fn server_summary(config: &Config) -> Vec<String> {
+pub fn server_summary(config: &Config) -> Vec<String> {
     let s = &config.server;
     let mut lines = vec![
         "  Receiving — the door (every incoming message)".to_string(),
@@ -631,8 +631,8 @@ fn add_domain(
     config_path: &std::path::Path,
     config: &Config,
 ) -> bool {
+    use crate::shared::core::config::Mode;
     use dialoguer::{Input, Select};
-    use std::io::Write;
 
     let name: String = match Input::<String>::with_theme(theme)
         .with_prompt("domain to add (e.g. news.example.com)")
@@ -660,59 +660,31 @@ fn add_domain(
         .default(0)
         .interact()
         .unwrap_or(0);
-    let mode_str = ["out", "both", "in"][m];
+    let mode = [Mode::Out, Mode::Both, Mode::In][m];
     let selector = "mb2026";
 
-    let pair = match crate::shared::dkim::generate_dkim_keypair() {
-        Ok(p) => p,
+    // Mint the signing key (shared with `mailbourne domain add`)…
+    let minted = match crate::cli::actions::mint_domain_key(config_path, &name, selector) {
+        Ok(minted) => minted,
         Err(e) => {
-            println!("  ✗ couldn't mint a key: {e}");
+            println!("  ✗ {e}");
             return false;
         }
     };
 
-    // Keys live next to the config, so it travels with them.
-    let keydir = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("keys");
-    let _ = std::fs::create_dir_all(&keydir);
-    let keyfile = keydir.join(format!("{name}.pem"));
-    if std::fs::write(&keyfile, &pair.private_key_pem).is_err() {
-        println!("  ✗ couldn't write the key file.");
+    // …then register it with the same format-preserving edit the CLI uses.
+    if !rewrite(config_path, |toml| {
+        crate::shared::core::edit::add_domain(toml, &name, mode, &minted.selector, &minted.rel_key)
+    }) {
         return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&keyfile, std::fs::Permissions::from_mode(0o600));
-    }
-
-    // Append a fresh [[domain]] table — the header resets TOML context, so
-    // this is safe regardless of what the file ended with, and it leaves
-    // every existing line (and comment) untouched.
-    let block = format!(
-        "\n[[domain]]\nname = \"{name}\"\nmode = \"{mode_str}\"\ndkim_selector = \"{selector}\"\ndkim_key = \"keys/{name}.pem\"\n"
-    );
-    match std::fs::OpenOptions::new().append(true).open(config_path) {
-        Ok(mut f) => {
-            if f.write_all(block.as_bytes()).is_err() {
-                println!("  ✗ couldn't update the config.");
-                return false;
-            }
-        }
-        Err(_) => {
-            println!("  ✗ couldn't open the config to update it.");
-            return false;
-        }
     }
 
     // Ledger Law: end by showing what to publish.
     println!("\n  ✓ added {name} — minted its DKIM key, registered it in the config.");
     println!("\n  publish this to get {name} signing (paste at your DNS provider):");
     println!(
-        "    {selector}._domainkey.{name}   TXT   {}",
-        pair.dns_record_value
+        "    {}._domainkey.{name}   TXT   {}",
+        minted.selector, minted.dns_record_value
     );
     println!("\n  then open *@{name} from the menu and 'inspect' to watch it land. ☕");
     true
