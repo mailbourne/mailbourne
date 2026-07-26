@@ -5,8 +5,10 @@
 > Single binary, Rust-native, with a built-in inspector for DNS, DKIM, and
 > deliverability.
 
-**Status: brewing.** ☕ Early days — outbound sending and the guided console
-work today; receiving and the full daemon are in progress. Published across
+**Status: brewing, and it runs.** ☕ Early days, but there's a working engine:
+sending, receiving, the guided console, SMTP submission (AUTH over STARTTLS),
+a built-in ACME certbot, and the inbound SPF/DKIM/DMARC "door" all work today.
+Not yet proven in the wild, so treat it as pre-1.0. Published across
 [crates.io](https://crates.io/crates/mailbourne),
 [npm](https://www.npmjs.com/package/mailbourne), and
 [PyPI](https://pypi.org/project/mailbourne/) as it's built.
@@ -58,8 +60,67 @@ paste right there, no back-and-forth to another screen:
 
 Add a domain, rotate its DKIM key, change what it does, send a test — all
 from the same guided menus, each ending by showing you exactly what changed.
-For scripting, every action has a plain subcommand too (`mailbourne domain
-add`, `mailbourne send`, …).
+
+## Quickstart
+
+Install the binary, or embed the library:
+
+```bash
+cargo install mailbourne                 # the CLI (one static binary)
+cargo add mailbourne                      # or embed the engine in a Rust app
+# docker: docker run -p 25:25 -v $PWD:/var/mailbourne ghcr.io/mailbourne/mailbourne
+```
+
+Then stand a server up. Every step below is a plain, non-interactive command —
+the console is just a friendly face over these, so **you type the same things a
+script or an agent would**; nothing here needs the menus:
+
+```bash
+# one server, one domain that both sends and receives
+printf '[server]\nhostname = "mail.example.com"\n' > mailbourne.toml
+mailbourne domain  add example.com --mode both        # mints a DKIM key, prints the record to publish
+mailbourne account add you@example.com --password '…'  # a real mailbox + submission login
+mailbourne server  show                               # the door, TLS, submission, limits — at a glance
+
+# publish the DNS records it printed, then have it grade them against what's live:
+mailbourne domain show example.com
+
+# a real TLS certificate (mailbourne's own certbot), point the server at it, run:
+sudo mailbourne cert obtain --domain mail.example.com --production
+mailbourne server set --tls-cert mail.example.com.crt --tls-key mail.example.com.key
+sudo mailbourne serve --port 25
+```
+
+Two chores live at your VPS provider, not here: set the server's **PTR**
+(reverse DNS) and confirm outbound **port 25** isn't blocked. The inspector
+flags both if they're wrong.
+
+## Every command
+
+The interactive console can do all of this, but each action is also a
+first-class command — so a person and a script reach for exactly the same
+thing. Add `--config <path>` to point at a specific `mailbourne.toml`.
+
+| To… | Run |
+|---|---|
+| send one message, narrating each step | `mailbourne send --to … --from …` |
+| run the receiving daemon | `mailbourne serve --port 25` |
+| add a domain (mints its DKIM key) | `mailbourne domain add <name> --mode out\|in\|both` |
+| change a domain's direction | `mailbourne domain set-mode <name> --mode …` |
+| rotate a domain's DKIM key | `mailbourne domain rekey <name> --selector …` |
+| drop a domain | `mailbourne domain remove <name>` |
+| grade a domain against live DNS | `mailbourne domain show <name>` |
+| list domains | `mailbourne domain list` |
+| add a mailbox (and submission login) | `mailbourne account add <addr> --password …` |
+| change a password / remove an account | `mailbourne account passwd\|remove <addr>` |
+| view or change server settings | `mailbourne server show` · `mailbourne server set --…` |
+| forward an address elsewhere | `mailbourne forward add <alias> --to <dest>` |
+| mint a DKIM key + print its record | `mailbourne dns keygen --selector … --domain …` |
+| get a TLS cert from Let's Encrypt | `mailbourne cert obtain --domain … [--production]` |
+| explain a piece of jargon | `mailbourne explain <term>` |
+
+Pass `--password` to `account add`/`passwd` to run unattended; omit it for a
+hidden prompt. Config edits preserve your comments and layout.
 
 ## The map of email (and where it trips people up)
 
