@@ -13,6 +13,7 @@
 //! pipeline (SPF/DKIM/DMARC, rate-limit, greylist) arrives next.
 
 use crate::send::retry::Policy as RetryPolicy;
+use crate::server::door::Doorman;
 use crate::server::inbound::session::{Authenticator, Commit, CommitReject, ReceivedMessage};
 use crate::server::policy::Policy;
 use crate::server::route::DeliveryTarget;
@@ -99,6 +100,7 @@ impl Commit for SpoolCommit {
 /// # Errors
 /// Fails if the address can't be bound (e.g. port 25 needs privilege, or is
 /// already in use).
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     addr: SocketAddr,
     hostname: String,
@@ -110,6 +112,7 @@ pub async fn run(
     mailbox_quota_bytes: u64,
     tls: Option<Arc<TlsAcceptor>>,
     auth: Option<Arc<dyn Authenticator>>,
+    doorman: Option<Arc<dyn Doorman>>,
 ) -> std::io::Result<()> {
     // Cap the waiting room (0 = unlimited). A full spool answers 451, not 250.
     let spool = Spool::with_cap(spool_dir, spool_max_bytes)
@@ -134,11 +137,12 @@ pub async fn run(
     ));
 
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let hostname = hostname.clone();
         let policy = policy.clone();
         let tls = tls.clone();
         let auth = auth.clone();
+        let doorman = doorman.clone();
         let commit = SpoolCommit {
             spool: spool.clone(),
             target_names: target_names.clone(),
@@ -146,7 +150,17 @@ pub async fn run(
             mailbox_quota: mailbox_quota_bytes,
         };
         tokio::spawn(async move {
-            handle_connection(stream, &hostname, policy.as_ref(), &commit, tls, auth).await;
+            handle_connection(
+                stream,
+                &hostname,
+                policy.as_ref(),
+                &commit,
+                tls,
+                auth,
+                peer.ip(),
+                doorman,
+            )
+            .await;
         });
     }
 }
@@ -155,6 +169,7 @@ pub async fn run(
 /// message to the spool (via `commit`) before the `250`. Delivery is the
 /// worker's job, not this task's. `tls`, when present, lets the session offer
 /// STARTTLS.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     hostname: &str,
@@ -162,9 +177,13 @@ async fn handle_connection(
     commit: &dyn Commit,
     tls: Option<Arc<TlsAcceptor>>,
     auth: Option<Arc<dyn Authenticator>>,
+    peer_ip: std::net::IpAddr,
+    doorman: Option<Arc<dyn Doorman>>,
 ) {
-    let _ =
-        crate::server::inbound::session::serve(stream, hostname, policy, commit, tls, auth).await;
+    let _ = crate::server::inbound::session::serve(
+        stream, hostname, policy, commit, tls, auth, peer_ip, doorman,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -200,7 +219,17 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
-            handle_connection(stream, "mail.test", &policy, &commit, None, None).await;
+            handle_connection(
+                stream,
+                "mail.test",
+                &policy,
+                &commit,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                None,
+            )
+            .await;
         });
 
         let envelope = Envelope {

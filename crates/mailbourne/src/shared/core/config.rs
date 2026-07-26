@@ -71,6 +71,11 @@ pub struct ServerConfig {
     /// Path to the TLS private key (PEM) that matches `tls_cert`.
     #[serde(default)]
     pub tls_key: Option<std::path::PathBuf>,
+    /// Whether to reject incoming mail that fails DMARC when the sender's
+    /// domain publishes `p=reject`. Defaults to `true` — the domain owner
+    /// asked for it. Set `false` to only annotate (`Authentication-Results`).
+    #[serde(default = "default_true")]
+    pub dmarc_enforce: bool,
 }
 
 /// One mailbox account: an address that really exists, its hashed password

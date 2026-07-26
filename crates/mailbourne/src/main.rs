@@ -917,6 +917,20 @@ async fn serve_cmd(
         },
     };
 
+    // The door: verify SPF/DKIM/DMARC on incoming mail, stamp the result, and
+    // (when enabled) reject a domain's own p=reject failures.
+    let doorman: Option<std::sync::Arc<dyn mailbourne::server::door::Doorman>> = Some(
+        std::sync::Arc::new(mailbourne::server::door::MailAuthDoor::new(
+            config.server.hostname.clone(),
+            config.server.dmarc_enforce,
+        )),
+    );
+    if config.server.dmarc_enforce {
+        println!("   door → SPF/DKIM/DMARC checked; failing p=reject mail refused");
+    } else {
+        println!("   door → SPF/DKIM/DMARC checked and annotated (enforcement off)");
+    }
+
     // Accepted-but-not-yet-delivered mail lives in a spool beside the maildir.
     let spool_dir = store_path
         .parent()
@@ -933,6 +947,7 @@ async fn serve_cmd(
         config.server.mailbox_quota_bytes,
         tls,
         auth,
+        doorman,
     )
     .await
     {

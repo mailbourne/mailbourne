@@ -11,10 +11,12 @@
 //! ends **only** on an exact `\r\n.\r\n` — bare-LF ambiguity never
 //! terminates, which is the SMTP-smuggling defense.
 
+use crate::server::door::Doorman;
 use crate::server::inbound::command::{self, SmtpCommand};
 use crate::server::policy::{Policy, Verdict};
 use async_trait::async_trait;
 use base64::Engine;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -191,6 +193,7 @@ fn b64(text: &str) -> String {
 /// # Errors
 /// Propagates socket errors, and treats a connection that drops mid-`DATA`
 /// as an [`std::io::ErrorKind::UnexpectedEof`].
+#[allow(clippy::too_many_arguments)]
 pub async fn serve<S>(
     stream: S,
     our_hostname: &str,
@@ -198,6 +201,8 @@ pub async fn serve<S>(
     commit: &dyn Commit,
     tls: Option<Arc<TlsAcceptor>>,
     auth: Option<Arc<dyn Authenticator>>,
+    peer_ip: IpAddr,
+    doorman: Option<Arc<dyn Doorman>>,
 ) -> std::io::Result<Vec<ReceivedMessage>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -210,6 +215,8 @@ where
 
     let mut greeted = false;
     let mut on_tls = false;
+    // The client's announced name (for the door's SPF check).
+    let mut helo_name = String::new();
     // The authenticated account, once AUTH succeeds — the seam submission
     // (relay-when-logged-in) builds on.
     let mut authenticated: Option<String> = None;
@@ -227,8 +234,9 @@ where
         };
 
         match command::parse(&line) {
-            SmtpCommand::Ehlo(_) | SmtpCommand::Helo(_) => {
+            SmtpCommand::Ehlo(name) | SmtpCommand::Helo(name) => {
                 greeted = true;
+                helo_name = name;
                 mail_from = None;
                 rcpts.clear();
                 write
@@ -292,7 +300,30 @@ where
                 }
                 reply(&mut write, 354, "go ahead; end with <CRLF>.<CRLF>").await?;
                 match read_payload(&mut reader).await? {
-                    Some(data) => {
+                    Some(mut data) => {
+                        // The door runs on incoming (unauthenticated) mail:
+                        // verify SPF/DKIM/DMARC, stamp the result, and refuse a
+                        // domain's own p=reject failures. Submission (a logged-in
+                        // sender) skips it — they're trusted.
+                        if authenticated.is_none()
+                            && let Some(door) = &doorman
+                        {
+                            let sender = mail_from.clone().unwrap_or_default();
+                            let assessment = door.assess(peer_ip, &helo_name, &sender, &data).await;
+                            if let Some(reason) = assessment.reject {
+                                reply(&mut write, 550, &reason).await?;
+                                mail_from = None;
+                                rcpts.clear();
+                                continue;
+                            }
+                            // Prepend the Authentication-Results header (a trace
+                            // header — it never touches the signed content).
+                            let mut annotated =
+                                Vec::with_capacity(assessment.header.len() + data.len());
+                            annotated.extend_from_slice(assessment.header.as_bytes());
+                            annotated.extend_from_slice(&data);
+                            data = annotated;
+                        }
                         let message = ReceivedMessage {
                             mail_from: mail_from.take().unwrap_or_default(),
                             rcpt_to: std::mem::take(&mut rcpts),
@@ -613,6 +644,8 @@ mod tests {
                 &AcceptAll,
                 Some(acceptor),
                 None,
+                "127.0.0.1".parse().unwrap(),
+                None,
             )
             .await
             .unwrap()
@@ -677,9 +710,18 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None, None)
-                .await
-                .unwrap()
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap()
         });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
@@ -716,9 +758,18 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &RejectAll, None, None)
-                .await
-                .unwrap()
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &RejectAll,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap()
         });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
@@ -748,9 +799,18 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None, None)
-                .await
-                .unwrap()
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap()
         });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
@@ -777,9 +837,18 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None, None)
-                .await
-                .unwrap()
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap()
         });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
@@ -803,9 +872,18 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None, None)
-                .await
-                .unwrap()
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap()
         });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
@@ -833,9 +911,18 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None, None)
-                .await
-                .unwrap()
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap()
         });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
@@ -866,9 +953,18 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
         let task = tokio::spawn(async move {
-            serve(server, "mail.test", &policy, &AcceptAll, None, None)
-                .await
-                .unwrap()
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap()
         });
         let (cr, mut cw) = tokio::io::split(client);
         let mut r = BufReader::new(cr);
@@ -952,6 +1048,8 @@ mod tests {
                 &commit,
                 Some(acceptor),
                 Some(Arc::new(TestAuth)),
+                "127.0.0.1".parse().unwrap(),
+                None,
             )
             .await
             .unwrap()
@@ -1041,6 +1139,8 @@ mod tests {
                 &AcceptAll,
                 None,
                 Some(Arc::new(TestAuth)),
+                "127.0.0.1".parse().unwrap(),
+                None,
             )
             .await
             .unwrap()
@@ -1090,6 +1190,8 @@ mod tests {
                 &AcceptAll,
                 Some(acceptor),
                 Some(Arc::new(TestAuth)),
+                "127.0.0.1".parse().unwrap(),
+                None,
             )
             .await
             .unwrap()
@@ -1147,5 +1249,92 @@ mod tests {
         drop(tw);
         drop(r);
         task.await.unwrap();
+    }
+
+    /// A door with a fixed verdict, for the door-integration tests.
+    struct FakeDoor {
+        reject: bool,
+    }
+    #[async_trait]
+    impl Doorman for FakeDoor {
+        async fn assess(
+            &self,
+            _peer_ip: IpAddr,
+            _helo: &str,
+            _mail_from: &str,
+            _data: &[u8],
+        ) -> crate::server::door::Assessment {
+            crate::server::door::Assessment {
+                header: "Authentication-Results: test; spf=pass\r\n".to_string(),
+                reject: self.reject.then(|| "forged sender".to_string()),
+            }
+        }
+    }
+
+    /// Drives a full incoming transaction to bob@mail.test and returns the
+    /// code answered after DATA, plus the committed messages.
+    async fn incoming_with_door(door: FakeDoor) -> (u16, Vec<ReceivedMessage>) {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let policy = crate::server::policy::HostedDomains::new(["mail.test".to_string()]);
+        let door: Arc<dyn Doorman> = Arc::new(door);
+        let task = tokio::spawn(async move {
+            serve(
+                server,
+                "mail.test",
+                &policy,
+                &AcceptAll,
+                None,
+                None,
+                "127.0.0.1".parse().unwrap(),
+                Some(door),
+            )
+            .await
+            .unwrap()
+        });
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut r = BufReader::new(cr);
+        assert_eq!(code(&mut r).await, 220);
+        send(&mut cw, "EHLO client.test").await;
+        code(&mut r).await;
+        send(&mut cw, "MAIL FROM:<a@sender.test>").await;
+        code(&mut r).await;
+        send(&mut cw, "RCPT TO:<bob@mail.test>").await;
+        code(&mut r).await;
+        send(&mut cw, "DATA").await;
+        code(&mut r).await;
+        cw.write_all(b"Subject: hi\r\n\r\nbody\r\n.\r\n")
+            .await
+            .unwrap();
+        cw.flush().await.unwrap();
+        let after_data = code(&mut r).await;
+        send(&mut cw, "QUIT").await;
+        code(&mut r).await;
+        drop(cw);
+        drop(r);
+        (after_data, task.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn the_door_refuses_mail_it_rejects() {
+        let (code, messages) = incoming_with_door(FakeDoor { reject: true }).await;
+        assert_eq!(code, 550, "a rejected message must be refused");
+        assert!(messages.is_empty(), "nothing is committed on rejection");
+    }
+
+    #[tokio::test]
+    async fn the_door_stamps_authentication_results_on_accepted_mail() {
+        let (code, messages) = incoming_with_door(FakeDoor { reject: false }).await;
+        assert_eq!(code, 250);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]
+                .data
+                .starts_with(b"Authentication-Results: test; spf=pass\r\n"),
+            "the AR header is prepended"
+        );
+        assert!(
+            String::from_utf8_lossy(&messages[0].data).contains("body"),
+            "the original message survives below the header"
+        );
     }
 }

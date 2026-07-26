@@ -16,6 +16,7 @@
 
 pub mod accounts;
 pub mod acme;
+pub mod door;
 pub mod forward;
 pub mod inbound;
 pub mod outbound;
