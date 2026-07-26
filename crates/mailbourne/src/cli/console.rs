@@ -534,6 +534,73 @@ fn send_test(
 }
 
 #[cfg(feature = "cli")]
+/// A byte count in friendly units; `0` means "unlimited".
+fn human_bytes(n: u64) -> String {
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+    if n == 0 {
+        "unlimited".to_string()
+    } else if n >= GIB {
+        format!("{} GiB", n / GIB)
+    } else if n >= MIB {
+        format!("{} MiB", n / MIB)
+    } else {
+        format!("{n} bytes")
+    }
+}
+
+/// The server-level settings, rendered as lines — every recent capability made
+/// explicit, each with how to learn about or change it. Pure (no I/O) so it's
+/// testable and reused by `mailbourne server`.
+pub(crate) fn server_summary(config: &Config) -> Vec<String> {
+    let s = &config.server;
+    let mut lines = vec![
+        "  Receiving — the door (every incoming message)".to_string(),
+        "    SPF · DKIM · DMARC    verified, stamped into Authentication-Results".to_string(),
+        format!(
+            "    DMARC p=reject        {}",
+            if s.dmarc_enforce {
+                "enforced — forged mail is refused"
+            } else {
+                "annotated only (enforcement off)"
+            }
+        ),
+        "      what these mean →    mailbourne explain dmarc   (or spf, dkim)".to_string(),
+        format!(
+            "    spool cap             {}",
+            human_bytes(s.spool_max_bytes)
+        ),
+        format!(
+            "    mailbox quota         {}",
+            human_bytes(s.mailbox_quota_bytes)
+        ),
+        String::new(),
+        "  Sending & submission".to_string(),
+        "    STARTTLS              on".to_string(),
+    ];
+    match &s.tls_cert {
+        Some(path) => lines.push(format!("    TLS certificate       {}", path.display())),
+        None => lines.push(
+            "    TLS certificate       self-signed — for a trusted one:\n\
+             \x20                         mailbourne cert obtain --domain <you> --production"
+                .to_string(),
+        ),
+    }
+    lines.push(format!(
+        "    accounts              {} — may send via AUTH over TLS  (add: mailbourne account add <addr>)",
+        config.accounts.len()
+    ));
+    match &s.webhook_url {
+        Some(url) => lines.push(format!("    webhook               {url}")),
+        None => lines.push("    webhook               —".to_string()),
+    }
+    lines.push(format!(
+        "    forwards              {}",
+        config.forwards.len()
+    ));
+    lines
+}
+
 fn server_screen(
     handle: &tokio::runtime::Handle,
     theme: &dialoguer::theme::ColorfulTheme,
@@ -545,12 +612,13 @@ fn server_screen(
         .unwrap_or_default();
     println!("\n☕ {}  ·  the server (the van)", config.server.hostname);
     match ip.first() {
-        Some(ip) => println!("    IP            {ip}"),
-        None => println!("    IP            does not resolve yet"),
+        Some(ip) => println!("    IP                    {ip}"),
+        None => println!("    IP                    does not resolve yet"),
     }
-    println!("    port 25       — checked with the receiving daemon (coming)");
-    println!("    reverse DNS   — set at your VPS provider (coming: guided)");
-    println!("    TLS cert      — auto via ACME (coming with serving)");
+    println!();
+    for line in server_summary(config) {
+        println!("{line}");
+    }
     let _ = Select::with_theme(theme)
         .items(&["back"])
         .default(0)
@@ -716,6 +784,43 @@ fn first_run(theme: &dialoguer::theme::ColorfulTheme) -> Option<(std::path::Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_summary_makes_the_door_and_capabilities_explicit() {
+        let config = Config::parse_toml(
+            "[server]\n\
+             hostname = \"mail.ours.test\"\n\
+             dmarc_enforce = true\n\
+             mailbox_quota_bytes = 2147483648\n\n\
+             [[account]]\n\
+             address = \"bob@ours.test\"\n\
+             password_hash = \"x\"\n",
+        )
+        .unwrap();
+        let text = server_summary(&config).join("\n");
+        // The door is explicit, and points at how to understand it.
+        assert!(text.contains("SPF · DKIM · DMARC"));
+        assert!(text.contains("enforced"), "enforcement state shown");
+        assert!(text.contains("mailbourne explain dmarc"), "learn-more link");
+        // Limits and submission are visible with their real values.
+        assert!(text.contains("2 GiB"), "mailbox quota rendered");
+        assert!(text.contains("1 GiB"), "spool cap default rendered");
+        assert!(
+            text.contains("accounts              1"),
+            "account count shown"
+        );
+        assert!(
+            text.contains("mailbourne account add"),
+            "action command shown"
+        );
+    }
+
+    #[test]
+    fn human_bytes_is_friendly() {
+        assert_eq!(human_bytes(0), "unlimited");
+        assert_eq!(human_bytes(1 << 30), "1 GiB");
+        assert_eq!(human_bytes(5 << 20), "5 MiB");
+    }
 
     fn statuses() -> Vec<DomainStatus> {
         vec![
