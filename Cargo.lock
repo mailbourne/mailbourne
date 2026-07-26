@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "mailbourne"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "argon2",
  "async-trait",
