@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.0.6 — unreleased
+## 0.0.7 — unreleased
+
+- **`send::conversation::submit`** — submission over a stream that is
+  already what it will be: port 465, where TLS starts at the first byte and
+  there is no `STARTTLS` to negotiate, or a localhost test sink with no
+  encryption at all. The channel is the caller's decision there, and so is
+  the risk; `submit_with_starttls` remains the one that refuses to send a
+  password in the clear.
+
+## 0.0.6
 
 Rich messages, and the half of SMTP a client speaks.
 

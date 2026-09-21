@@ -304,6 +304,42 @@ impl std::fmt::Debug for Credentials {
     }
 }
 
+/// Submits over a stream that is already what it is going to be.
+///
+/// Two callers want this. One has connected to port 465, where TLS starts
+/// at the first byte and there is no `STARTTLS` to negotiate. The other is
+/// pointing at a test sink on localhost and has chosen, deliberately, to
+/// use no encryption at all.
+///
+/// Because the channel is the caller's decision here, so is the risk: this
+/// will send the password over whatever stream it is handed. Prefer
+/// [`submit_with_starttls`], which refuses to do that in the clear.
+///
+/// # Errors
+/// [`ReplyError`] on wire failures. Refusals, including a rejected
+/// password, are [`Outcome`]s naming [`Step::Auth`].
+pub async fn submit<S>(
+    stream: S,
+    our_hostname: &str,
+    credentials: &Credentials,
+    envelope: &crate::shared::core::Envelope,
+    message: &crate::shared::core::Message,
+) -> Result<Outcome, ReplyError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut chat = tokio::io::BufReader::new(stream);
+    let capabilities = match open_dialogue(&mut chat, our_hostname).await? {
+        Opening::Refused(outcome) => return Ok(outcome),
+        Opening::Ready { capabilities } => capabilities,
+    };
+    if let Some(outcome) = authenticate(&mut chat, &capabilities, credentials).await? {
+        say_goodbye(&mut chat).await;
+        return Ok(outcome);
+    }
+    finish_dialogue(chat, envelope, message).await
+}
+
 /// Hands a message to a relay that will deliver it onward — *submission*,
 /// not delivery.
 ///
@@ -921,7 +957,7 @@ mod tests {
     // ── Submission: the half of SMTP a client speaks and an MTA never does ──
 
     /// Runs `submit_with_starttls` against the fake relay, upgrade injected.
-    async fn submit(script: MxScript, password: &str) -> (Result<Outcome, ReplyError>, MxLog) {
+    async fn submit_tls(script: MxScript, password: &str) -> (Result<Outcome, ReplyError>, MxLog) {
         let (client_side, server_side) = tokio::io::duplex(64 * 1024);
         let server = tokio::spawn(fake_mx(server_side, script));
         let outcome = submit_with_starttls(
@@ -943,7 +979,7 @@ mod tests {
     #[tokio::test]
     async fn submission_goes_private_then_proves_who_it_is_then_sends() {
         let script = offering("250-fake.mx greets you\r\n250-STARTTLS\r\n250-AUTH PLAIN LOGIN\r\n250 OK\r\n");
-        let (outcome, log) = submit(script, "hunter2").await;
+        let (outcome, log) = submit_tls(script, "hunter2").await;
 
         assert!(matches!(outcome.unwrap(), Outcome::Delivered { .. }));
         assert_eq!(log.commands[0], "EHLO mail.us.example");
@@ -964,7 +1000,7 @@ mod tests {
         // The relay offers no STARTTLS. Delivery would shrug and continue;
         // submission must not, because the next thing it would say is a
         // secret. This is the whole reason submission is its own function.
-        let (outcome, log) = submit(MxScript::default(), "hunter2").await;
+        let (outcome, log) = submit_tls(MxScript::default(), "hunter2").await;
 
         match outcome.unwrap() {
             Outcome::Rejected { at, reply } => {
@@ -991,7 +1027,7 @@ mod tests {
             auth: "334 VXNlcm5hbWU6\r\n",
             ..MxScript::default()
         };
-        let (_outcome, log) = submit(script, "hunter2").await;
+        let (_outcome, log) = submit_tls(script, "hunter2").await;
 
         assert_eq!(log.commands[3], "AUTH LOGIN");
         // Then the user and the password, each base64'd, one line at a time.
@@ -1009,7 +1045,7 @@ mod tests {
             auth: "535 authentication failed\r\n",
             ..MxScript::default()
         };
-        let (outcome, log) = submit(script, "wrong").await;
+        let (outcome, log) = submit_tls(script, "wrong").await;
 
         match outcome.unwrap() {
             Outcome::Rejected { at, reply } => {
@@ -1027,5 +1063,32 @@ mod tests {
         let shown = format!("{c:?}");
         assert!(shown.contains("alice@us.example"));
         assert!(!shown.contains("hunter2"), "a debug line ends up in a log: {shown}");
+    }
+
+    #[tokio::test]
+    async fn submit_over_an_already_private_stream_skips_starttls_and_still_authenticates() {
+        // Port 465: TLS from the first byte, so there is nothing to
+        // negotiate and the dialogue goes straight to proving who we are.
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let script = MxScript {
+            ehlo: "250-fake.mx greets you\r\n250-AUTH PLAIN\r\n250 OK\r\n",
+            ..MxScript::default()
+        };
+        let server = tokio::spawn(fake_mx(server_side, script));
+        let outcome = submit(
+            client_side,
+            "mail.us.example",
+            &Credentials { user: "alice@us.example".into(), password: "hunter2".into() },
+            &envelope("alice@us.example", "bob@fake.mx"),
+            &crate::shared::core::Message::from_raw(b"x\r\n".to_vec()),
+        )
+        .await;
+        let log = server.await.unwrap();
+
+        assert!(matches!(outcome.unwrap(), Outcome::Delivered { .. }));
+        assert_eq!(log.commands[0], "EHLO mail.us.example");
+        assert!(log.commands[1].starts_with("AUTH PLAIN "));
+        assert_eq!(log.commands[2], "MAIL FROM:<alice@us.example>");
+        assert!(log.commands.iter().all(|c| c != "STARTTLS"));
     }
 }
