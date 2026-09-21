@@ -151,6 +151,8 @@ pub enum Step {
     Payload,
     /// Asking to go private (`STARTTLS`).
     StartTls,
+    /// Proving who we are (`AUTH`), when submitting rather than delivering.
+    Auth,
 }
 
 /// How one delivery attempt ended.
@@ -280,6 +282,151 @@ where
         Opening::Refused(outcome) => Ok(outcome),
         Opening::Ready { .. } => finish_dialogue(chat, envelope, message).await,
     }
+}
+
+/// Who we are, when submitting to a relay that asks.
+///
+/// Delivery between servers is anonymous; submission is not. A relay will
+/// carry mail for *its own* users and nobody else, so it asks first.
+#[derive(Clone)]
+pub struct Credentials {
+    /// The submission login, usually a full address.
+    pub user: String,
+    /// Its password.
+    pub password: String,
+}
+
+impl std::fmt::Debug for Credentials {
+    /// Never prints the password: a debug line ends up in a log, and a log
+    /// ends up somewhere you did not choose.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials").field("user", &self.user).field("password", &"…").finish()
+    }
+}
+
+/// Hands a message to a relay that will deliver it onward — *submission*,
+/// not delivery.
+///
+/// The difference from [`deliver_with_starttls`] is not cosmetic:
+///
+/// - **TLS is required, not opportunistic.** A relay that does not offer
+///   `STARTTLS` is refused, because the next thing we would send is a
+///   password. Delivery may fall back to plaintext; submission may not.
+/// - **We prove who we are.** `AUTH PLAIN` if the server offers it, else
+///   `AUTH LOGIN`, which is the same secret in a more talkative form and is
+///   all some older relays accept.
+///
+/// This is what an application uses to send mail through a mail server it
+/// owns. It is the half of SMTP an MTA never needs and every client does.
+///
+/// # Errors
+/// [`ReplyError`] on wire failures. A refusal — including a rejected
+/// password — is an [`Outcome`], not an error, and names [`Step::Auth`].
+pub async fn submit_with_starttls<S, U, Fut, T>(
+    stream: S,
+    upgrade: U,
+    our_hostname: &str,
+    credentials: &Credentials,
+    envelope: &crate::shared::core::Envelope,
+    message: &crate::shared::core::Message,
+) -> Result<Outcome, ReplyError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    U: FnOnce(S) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut chat = tokio::io::BufReader::new(stream);
+    let capabilities = match open_dialogue(&mut chat, our_hostname).await? {
+        Opening::Refused(outcome) => return Ok(outcome),
+        Opening::Ready { capabilities } => capabilities,
+    };
+
+    if !capabilities.iter().any(|cap| cap.eq_ignore_ascii_case("STARTTLS")) {
+        say_goodbye(&mut chat).await;
+        return Ok(Outcome::Rejected {
+            at: Step::StartTls,
+            reply: Reply {
+                code: 538,
+                lines: vec![
+                    "this relay does not offer STARTTLS, and a password may not cross in plaintext"
+                        .to_string(),
+                ],
+            },
+        });
+    }
+
+    send_line(&mut chat, "STARTTLS").await?;
+    let reply = read_reply(&mut chat).await?;
+    if let Some(outcome) = refusal(Step::StartTls, reply, Severity::Success) {
+        say_goodbye(&mut chat).await;
+        return Ok(outcome);
+    }
+
+    let secured = upgrade(chat.into_inner()).await?;
+    let mut chat = tokio::io::BufReader::new(secured);
+
+    let capabilities = match open_dialogue_after_tls(&mut chat, our_hostname).await? {
+        Opening::Refused(outcome) => return Ok(outcome),
+        Opening::Ready { capabilities } => capabilities,
+    };
+
+    if let Some(outcome) = authenticate(&mut chat, &capabilities, credentials).await? {
+        say_goodbye(&mut chat).await;
+        return Ok(outcome);
+    }
+
+    finish_dialogue(chat, envelope, message).await
+}
+
+/// Proves who we are. Answers `None` when the relay accepted us.
+async fn authenticate<C>(
+    chat: &mut C,
+    capabilities: &[String],
+    credentials: &Credentials,
+) -> Result<Option<Outcome>, ReplyError>
+where
+    C: AsyncBufRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mechanisms = capabilities
+        .iter()
+        .find(|cap| cap.to_ascii_uppercase().starts_with("AUTH"))
+        .map(|cap| cap.to_ascii_uppercase())
+        .unwrap_or_default();
+    // A relay that lists nothing is still worth trying PLAIN on: some
+    // announce AUTH only after TLS in a form this crude match misses.
+    let prefer_plain = mechanisms.is_empty() || mechanisms.contains("PLAIN");
+
+    let reply = if prefer_plain {
+        // RFC 4616: a NUL, the user, a NUL, the password — base64'd whole.
+        let mut secret = Vec::new();
+        secret.push(0u8);
+        secret.extend_from_slice(credentials.user.as_bytes());
+        secret.push(0u8);
+        secret.extend_from_slice(credentials.password.as_bytes());
+        let encoded = crate::shared::mime::base64_wrapped(&secret).replace("\r\n", "");
+        send_line(chat, &format!("AUTH PLAIN {encoded}")).await?;
+        read_reply(chat).await?
+    } else {
+        // AUTH LOGIN: the same secret, one prompt at a time.
+        send_line(chat, "AUTH LOGIN").await?;
+        let prompt = read_reply(chat).await?;
+        if let Some(outcome) = refusal(Step::Auth, prompt, Severity::Intermediate) {
+            return Ok(Some(outcome));
+        }
+        let user = crate::shared::mime::base64_wrapped(credentials.user.as_bytes()).replace("\r\n", "");
+        send_line(chat, &user).await?;
+        let prompt = read_reply(chat).await?;
+        if let Some(outcome) = refusal(Step::Auth, prompt, Severity::Intermediate) {
+            return Ok(Some(outcome));
+        }
+        let password =
+            crate::shared::mime::base64_wrapped(credentials.password.as_bytes()).replace("\r\n", "");
+        send_line(chat, &password).await?;
+        read_reply(chat).await?
+    };
+
+    Ok(refusal(Step::Auth, reply, Severity::Success))
 }
 
 /// The post-upgrade re-introduction: just the second `EHLO` (no greeting —
@@ -511,6 +658,7 @@ mod tests {
         data: &'static str,
         after_payload: &'static str,
         starttls: &'static str,
+        auth: &'static str,
     }
 
     impl Default for MxScript {
@@ -522,6 +670,7 @@ mod tests {
                 rcpt: "250 recipient ok\r\n",
                 data: "354 go ahead\r\n",
                 after_payload: "250 queued as 42\r\n",
+                auth: "235 authentication succeeded\r\n",
                 starttls: "220 go ahead, let's go private\r\n",
             }
         }
@@ -559,6 +708,8 @@ mod tests {
                 script.ehlo
             } else if upper.starts_with("STARTTLS") {
                 script.starttls
+            } else if upper.starts_with("AUTH") {
+                script.auth
             } else if upper.starts_with("MAIL") {
                 script.mail
             } else if upper.starts_with("RCPT") {
@@ -765,5 +916,116 @@ mod tests {
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    // ── Submission: the half of SMTP a client speaks and an MTA never does ──
+
+    /// Runs `submit_with_starttls` against the fake relay, upgrade injected.
+    async fn submit(script: MxScript, password: &str) -> (Result<Outcome, ReplyError>, MxLog) {
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(fake_mx(server_side, script));
+        let outcome = submit_with_starttls(
+            client_side,
+            |stream| async move { Ok::<_, std::io::Error>(stream) },
+            "mail.us.example",
+            &Credentials { user: "alice@us.example".into(), password: password.into() },
+            &envelope("alice@us.example", "bob@fake.mx"),
+            &crate::shared::core::Message::from_raw(b"x\r\n".to_vec()),
+        )
+        .await;
+        (outcome, server.await.unwrap())
+    }
+
+    fn offering(caps: &'static str) -> MxScript {
+        MxScript { ehlo: caps, ..MxScript::default() }
+    }
+
+    #[tokio::test]
+    async fn submission_goes_private_then_proves_who_it_is_then_sends() {
+        let script = offering("250-fake.mx greets you\r\n250-STARTTLS\r\n250-AUTH PLAIN LOGIN\r\n250 OK\r\n");
+        let (outcome, log) = submit(script, "hunter2").await;
+
+        assert!(matches!(outcome.unwrap(), Outcome::Delivered { .. }));
+        assert_eq!(log.commands[0], "EHLO mail.us.example");
+        assert_eq!(log.commands[1], "STARTTLS");
+        assert_eq!(log.commands[2], "EHLO mail.us.example");
+        // AUTH comes after the channel is private, and before the envelope.
+        assert!(log.commands[3].starts_with("AUTH PLAIN "), "{:?}", log.commands[3]);
+        assert_eq!(log.commands[4], "MAIL FROM:<alice@us.example>");
+
+        // RFC 4616: NUL user NUL password, base64'd.
+        let encoded = log.commands[3].trim_start_matches("AUTH PLAIN ");
+        let expected = crate::shared::mime::base64_wrapped(b"\0alice@us.example\0hunter2").replace("\r\n", "");
+        assert_eq!(encoded, expected);
+    }
+
+    #[tokio::test]
+    async fn a_password_never_crosses_in_the_clear() {
+        // The relay offers no STARTTLS. Delivery would shrug and continue;
+        // submission must not, because the next thing it would say is a
+        // secret. This is the whole reason submission is its own function.
+        let (outcome, log) = submit(MxScript::default(), "hunter2").await;
+
+        match outcome.unwrap() {
+            Outcome::Rejected { at, reply } => {
+                assert_eq!(at, Step::StartTls);
+                assert!(reply.lines[0].contains("plaintext"), "{:?}", reply.lines);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(
+            log.commands.iter().all(|c| !c.to_uppercase().starts_with("AUTH")),
+            "no AUTH was attempted: {:?}",
+            log.commands
+        );
+        assert!(
+            !log.commands.iter().any(|c| c.contains("hunter2")),
+            "the password never reached the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_only_speaks_login_is_answered_in_its_own_dialect() {
+        let script = MxScript {
+            ehlo: "250-fake.mx greets you\r\n250-STARTTLS\r\n250-AUTH LOGIN\r\n250 OK\r\n",
+            auth: "334 VXNlcm5hbWU6\r\n",
+            ..MxScript::default()
+        };
+        let (_outcome, log) = submit(script, "hunter2").await;
+
+        assert_eq!(log.commands[3], "AUTH LOGIN");
+        // Then the user and the password, each base64'd, one line at a time.
+        assert_eq!(
+            log.commands[4],
+            crate::shared::mime::base64_wrapped(b"alice@us.example").replace("\r\n", "")
+        );
+        assert!(!log.commands.iter().any(|c| c.contains("hunter2")), "still never in the clear");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_is_a_refusal_that_names_the_step() {
+        let script = MxScript {
+            ehlo: "250-fake.mx greets you\r\n250-STARTTLS\r\n250-AUTH PLAIN\r\n250 OK\r\n",
+            auth: "535 authentication failed\r\n",
+            ..MxScript::default()
+        };
+        let (outcome, log) = submit(script, "wrong").await;
+
+        match outcome.unwrap() {
+            Outcome::Rejected { at, reply } => {
+                assert_eq!(at, Step::Auth, "the caller learns it was the password, not the letter");
+                assert_eq!(reply.code, 535);
+            }
+            other => panic!("expected Rejected at Auth, got {other:?}"),
+        }
+        assert!(log.commands.iter().all(|c| !c.starts_with("MAIL")), "the letter was never offered");
+    }
+
+    #[test]
+    fn credentials_never_print_their_password() {
+        let c = Credentials { user: "alice@us.example".into(), password: "hunter2".into() };
+        let shown = format!("{c:?}");
+        assert!(shown.contains("alice@us.example"));
+        assert!(!shown.contains("hunter2"), "a debug line ends up in a log: {shown}");
     }
 }

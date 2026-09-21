@@ -7,6 +7,7 @@
 //! - [`core`] — the vocabulary: addresses, envelopes, messages, events, config
 //! - [`dkim`] — mint a signing keypair, derive its publishable record
 //! - [`compose`] — build a well-formed [`Message`](core::Message)
+//! - [`mime`] — the parts a rich message is made of: encodings, boundaries
 //! - [`identity`] — resolve a domain's signing identity from config
 //! - [`glossary`] — plain-English descriptions for the jargon (SMTP, DKIM, …)
 
@@ -15,3 +16,4 @@ pub mod core;
 pub mod dkim;
 pub mod glossary;
 pub mod identity;
+pub mod mime;

@@ -39,6 +39,15 @@ enum Command {
             default_value = "This message left through mailbourne's own engine."
         )]
         body: String,
+        /// HTML rendering of the same letter. The plain body stays, as the
+        /// fallback for clients that show no HTML.
+        #[arg(long)]
+        html: Option<String>,
+        /// A file to attach. Repeat for several. `--attach report.pdf` keeps
+        /// the file's own name; `--attach "Certificate.pdf=/tmp/c.pdf"`
+        /// renames it for the recipient.
+        #[arg(long = "attach", value_name = "[NAME=]PATH")]
+        attach: Vec<String>,
         /// Our HELO identity; defaults to mail.<sender-domain>.
         #[arg(long)]
         hostname: Option<String>,
@@ -355,6 +364,33 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Reads `--attach` values into attachments.
+///
+/// `path` keeps the file's own name. `Name=path` renames it for the
+/// recipient, which is what stops a certificate arriving as
+/// `9f2c-4d1a-….pdf`. The `=` is split on the first occurrence, so a path
+/// containing one still works.
+fn read_attachments(specs: &[String]) -> Result<Vec<mailbourne::shared::mime::Attachment>, String> {
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let (name, path) = match spec.split_once('=') {
+            Some((name, path)) if !name.trim().is_empty() && !path.trim().is_empty() => {
+                (Some(name.trim().to_string()), path.trim())
+            }
+            _ => (None, spec.trim()),
+        };
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let filename = name.unwrap_or_else(|| {
+            std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "attachment".to_string())
+        });
+        out.push(mailbourne::shared::mime::Attachment::new(filename, bytes));
+    }
+    Ok(out)
+}
+
 async fn run_command(command: Command) -> i32 {
     match command {
         Command::Send {
@@ -362,6 +398,8 @@ async fn run_command(command: Command) -> i32 {
             from,
             subject,
             body,
+            html,
+            attach,
             hostname,
             dkim_domain,
             dkim_selector,
@@ -390,9 +428,31 @@ async fn run_command(command: Command) -> i32 {
             }
             let hostname = id.hostname;
 
+            let attachments = match read_attachments(&attach) {
+                Ok(list) => list,
+                Err(why) => {
+                    eprintln!("✗ {why}");
+                    return 1;
+                }
+            };
+            for a in &attachments {
+                println!(
+                    "  attaching {} …… ✓  {} ({} bytes)",
+                    a.filename,
+                    a.declared_type(),
+                    a.bytes.len()
+                );
+            }
             println!("  building message (RFC 5322)…… ✓");
-            let mut message =
-                mailbourne::shared::compose::plain_text(&from, &to, &subject, &body, &hostname);
+            let mut message = mailbourne::shared::compose::rich(
+                &from,
+                &to,
+                &subject,
+                &body,
+                html.as_deref(),
+                &attachments,
+                &hostname,
+            );
 
             match &id.dkim {
                 Some(dkim) => {
