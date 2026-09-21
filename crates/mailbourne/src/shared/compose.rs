@@ -98,11 +98,19 @@ pub fn rich(
     // The body of the letter: one part, or the two renderings of it.
     let (body_type, body) = match html {
         Some(html) => {
-            let (content_type, body) =
-                mime::multipart("alternative", &[mime::text_part("plain", text), mime::text_part("html", html)]);
+            let (content_type, body) = mime::multipart(
+                "alternative",
+                &[
+                    mime::text_part("plain", text),
+                    mime::text_part("html", html),
+                ],
+            );
             (content_type, body)
         }
-        None => ("text/plain; charset=utf-8".to_string(), mime::quoted_printable(text)),
+        None => (
+            "text/plain; charset=utf-8".to_string(),
+            mime::quoted_printable(text),
+        ),
     };
 
     let (content_type, body) = if attachments.is_empty() {
@@ -167,7 +175,6 @@ mod tests {
         String::from_utf8(msg.raw().to_vec()).unwrap()
     }
 
-
     fn addr(a: &str) -> EmailAddress {
         EmailAddress::parse(a).unwrap()
     }
@@ -199,14 +206,24 @@ mod tests {
     fn with_no_html_and_no_files_rich_is_exactly_plain_text() {
         let text = build("just words", None, &[]);
         assert!(text.contains("Content-Type: text/plain; charset=utf-8\r\n"));
-        assert!(!text.contains("multipart"), "nothing is paid for the general case");
+        assert!(
+            !text.contains("multipart"),
+            "nothing is paid for the general case"
+        );
         assert!(text.contains("\r\n\r\njust words"));
     }
 
     #[test]
     fn text_and_html_become_alternative_renderings_of_one_letter() {
-        let text = build("Your code is 002151.", Some("<p>Your code is <b>002151</b>.</p>"), &[]);
-        let header = text.lines().find(|l| l.starts_with("Content-Type:")).unwrap();
+        let text = build(
+            "Your code is 002151.",
+            Some("<p>Your code is <b>002151</b>.</p>"),
+            &[],
+        );
+        let header = text
+            .lines()
+            .find(|l| l.starts_with("Content-Type:"))
+            .unwrap();
         assert!(header.contains("multipart/alternative"), "{header}");
         let b = boundary_of(header);
 
@@ -223,8 +240,15 @@ mod tests {
     #[test]
     fn a_file_wraps_the_letter_in_a_mixed_tree() {
         let pdf = Attachment::new("certificate.pdf", b"%PDF-1.7 pretend".to_vec());
-        let text = build("Your certificate is attached.", None, std::slice::from_ref(&pdf));
-        let header = text.lines().find(|l| l.starts_with("Content-Type:")).unwrap();
+        let text = build(
+            "Your certificate is attached.",
+            None,
+            std::slice::from_ref(&pdf),
+        );
+        let header = text
+            .lines()
+            .find(|l| l.starts_with("Content-Type:"))
+            .unwrap();
         assert!(header.contains("multipart/mixed"), "{header}");
 
         // The letter is still readable text, and the file declares itself.
@@ -237,8 +261,15 @@ mod tests {
     #[test]
     fn html_and_a_file_nest_alternative_inside_mixed() {
         let pdf = Attachment::new("certificate.pdf", b"bytes".to_vec());
-        let text = build("plain words", Some("<b>rich words</b>"), std::slice::from_ref(&pdf));
-        let outer = text.lines().find(|l| l.starts_with("Content-Type:")).unwrap();
+        let text = build(
+            "plain words",
+            Some("<b>rich words</b>"),
+            std::slice::from_ref(&pdf),
+        );
+        let outer = text
+            .lines()
+            .find(|l| l.starts_with("Content-Type:"))
+            .unwrap();
         assert!(outer.contains("multipart/mixed"), "{outer}");
         let outer_b = boundary_of(outer);
 
@@ -265,7 +296,10 @@ mod tests {
         ];
         let text = build("two files", None, &files);
         assert!(text.contains("filename=\"one.pdf\"") && text.contains("filename=\"two.png\""));
-        assert!(text.contains("Content-Type: application/pdf") && text.contains("Content-Type: image/png"));
+        assert!(
+            text.contains("Content-Type: application/pdf")
+                && text.contains("Content-Type: image/png")
+        );
     }
 
     #[test]
@@ -280,10 +314,12 @@ mod tests {
             "mail.b.test",
         );
         let text = String::from_utf8(msg.raw().to_vec()).unwrap();
-        assert!(text.contains("Subject: =?utf-8?B?"), "an encoded word, not raw bytes");
+        assert!(
+            text.contains("Subject: =?utf-8?B?"),
+            "an encoded word, not raw bytes"
+        );
         assert!(!text.contains("Sertifikat — peserta"));
     }
-
 
     #[test]
     fn a_subject_can_neither_smuggle_a_header_nor_arrive_as_raw_bytes() {
@@ -297,8 +333,14 @@ mod tests {
             "mail.b.test",
         );
         let text = String::from_utf8(msg.raw().to_vec()).unwrap();
-        assert!(!text.contains("Bcc:") || text.contains("InvoiceBcc:"), "no new header was created");
-        assert_eq!(text.lines().filter(|l| l.starts_with("Subject:")).count(), 1);
+        assert!(
+            !text.contains("Bcc:") || text.contains("InvoiceBcc:"),
+            "no new header was created"
+        );
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("Subject:")).count(),
+            1
+        );
     }
 
     #[test]

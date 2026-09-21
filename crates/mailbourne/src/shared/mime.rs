@@ -111,8 +111,16 @@ pub fn base64_wrapped(bytes: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         raw.push(ALPHABET[(n >> 18) as usize & 63] as char);
         raw.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        raw.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        raw.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        raw.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        raw.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     let mut out = String::with_capacity(raw.len() + raw.len() / MAX_LINE * 2);
     for (i, chunk) in raw.as_bytes().chunks(MAX_LINE).enumerate() {
@@ -134,7 +142,10 @@ pub fn header_value(value: &str) -> String {
     if clean.is_ascii() {
         return clean;
     }
-    format!("=?utf-8?B?{}?=", base64_wrapped(clean.as_bytes()).replace("\r\n", ""))
+    format!(
+        "=?utf-8?B?{}?=",
+        base64_wrapped(clean.as_bytes()).replace("\r\n", "")
+    )
 }
 
 /// A `filename` parameter for `Content-Disposition`.
@@ -148,7 +159,11 @@ pub fn filename_parameter(name: &str) -> String {
         .chars()
         .filter(|c| !c.is_control() && *c != '"' && *c != '\\' && *c != '/')
         .collect();
-    let clean = if clean.trim().is_empty() { "attachment".to_string() } else { clean };
+    let clean = if clean.trim().is_empty() {
+        "attachment".to_string()
+    } else {
+        clean
+    };
     if clean.is_ascii() {
         return format!("filename=\"{clean}\"");
     }
@@ -169,7 +184,11 @@ pub fn filename_parameter(name: &str) -> String {
 /// `application/octet-stream`, which every client treats as "save this",
 /// and which is never wrong, only unhelpful.
 pub fn content_type_for(filename: &str) -> &'static str {
-    let ext = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     match ext.as_str() {
         "pdf" => "application/pdf",
         "png" => "image/png",
@@ -207,12 +226,24 @@ pub struct Attachment {
 impl Attachment {
     /// An attachment whose type is read from its filename.
     pub fn new(filename: impl Into<String>, bytes: Vec<u8>) -> Self {
-        Self { filename: filename.into(), content_type: None, bytes }
+        Self {
+            filename: filename.into(),
+            content_type: None,
+            bytes,
+        }
     }
 
     /// An attachment declaring its own type.
-    pub fn with_type(filename: impl Into<String>, content_type: impl Into<String>, bytes: Vec<u8>) -> Self {
-        Self { filename: filename.into(), content_type: Some(content_type.into()), bytes }
+    pub fn with_type(
+        filename: impl Into<String>,
+        content_type: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            filename: filename.into(),
+            content_type: Some(content_type.into()),
+            bytes,
+        }
     }
 
     /// The type this attachment declares on the wire.
@@ -227,7 +258,11 @@ impl Attachment {
         let mut part = String::new();
         let _ = write!(part, "Content-Type: {}\r\n", self.declared_type());
         part.push_str("Content-Transfer-Encoding: base64\r\n");
-        let _ = write!(part, "Content-Disposition: attachment; {}\r\n", filename_parameter(&self.filename));
+        let _ = write!(
+            part,
+            "Content-Disposition: attachment; {}\r\n",
+            filename_parameter(&self.filename)
+        );
         part.push_str("\r\n");
         part.push_str(&base64_wrapped(&self.bytes));
         part.push_str("\r\n");
@@ -261,7 +296,10 @@ pub fn multipart(subtype: &str, parts: &[String]) -> (String, String) {
         body.push_str(part);
     }
     let _ = write!(body, "\r\n--{boundary}--\r\n");
-    (format!("multipart/{subtype}; boundary=\"{boundary}\""), body)
+    (
+        format!("multipart/{subtype}; boundary=\"{boundary}\""),
+        body,
+    )
 }
 
 #[cfg(test)]
@@ -281,7 +319,10 @@ mod tests {
 
     #[test]
     fn quoted_printable_keeps_plain_english_readable_and_escapes_the_rest() {
-        assert_eq!(quoted_printable("Your code is 002151."), "Your code is 002151.");
+        assert_eq!(
+            quoted_printable("Your code is 002151."),
+            "Your code is 002151."
+        );
         // `=` is the escape character and must itself be escaped.
         assert_eq!(quoted_printable("a=b"), "a=3Db");
         // Non-ASCII becomes its UTF-8 bytes, each escaped.
@@ -298,7 +339,11 @@ mod tests {
         let long = "x".repeat(300);
         let out = quoted_printable(&long);
         for line in out.split("\r\n") {
-            assert!(line.len() <= MAX_LINE, "line of {} chars: {line}", line.len());
+            assert!(
+                line.len() <= MAX_LINE,
+                "line of {} chars: {line}",
+                line.len()
+            );
         }
         // A soft break is a trailing `=`, and the text survives it.
         assert!(out.contains("=\r\n"));
@@ -323,30 +368,60 @@ mod tests {
 
     #[test]
     fn a_header_passes_ascii_through_and_encodes_the_rest() {
-        assert_eq!(header_value("Your INDERA sign-in code"), "Your INDERA sign-in code");
+        assert_eq!(
+            header_value("Your INDERA sign-in code"),
+            "Your INDERA sign-in code"
+        );
         assert!(header_value("Sertifikat — peserta").starts_with("=?utf-8?B?"));
         // A header can never carry a newline: that would inject a header.
-        assert_eq!(header_value("Subject\r\nBcc: someone@evil.test"), "SubjectBcc: someone@evil.test");
+        assert_eq!(
+            header_value("Subject\r\nBcc: someone@evil.test"),
+            "SubjectBcc: someone@evil.test"
+        );
     }
 
     #[test]
     fn a_filename_is_quoted_when_plain_and_rfc_2231_when_not() {
-        assert_eq!(filename_parameter("certificate.pdf"), "filename=\"certificate.pdf\"");
-        assert_eq!(filename_parameter("annual report.pdf"), "filename=\"annual report.pdf\"");
+        assert_eq!(
+            filename_parameter("certificate.pdf"),
+            "filename=\"certificate.pdf\""
+        );
+        assert_eq!(
+            filename_parameter("annual report.pdf"),
+            "filename=\"annual report.pdf\""
+        );
         let fancy = filename_parameter("sertifikat peserta — 2026.pdf");
         assert!(fancy.starts_with("filename*=utf-8''"), "{fancy}");
-        assert!(fancy.contains("%E2%80%94"), "the em dash is percent-encoded: {fancy}");
+        assert!(
+            fancy.contains("%E2%80%94"),
+            "the em dash is percent-encoded: {fancy}"
+        );
         // A path separator or a quote would break out of the header.
-        assert_eq!(filename_parameter("../../etc/passwd"), "filename=\"....etcpasswd\"");
+        assert_eq!(
+            filename_parameter("../../etc/passwd"),
+            "filename=\"....etcpasswd\""
+        );
         assert_eq!(filename_parameter("   "), "filename=\"attachment\"");
     }
 
     #[test]
     fn a_file_takes_its_type_from_its_name_unless_it_says_otherwise() {
-        assert_eq!(Attachment::new("a.pdf", vec![]).declared_type(), "application/pdf");
-        assert_eq!(Attachment::new("a.PNG", vec![]).declared_type(), "image/png");
-        assert_eq!(Attachment::new("a.wat", vec![]).declared_type(), "application/octet-stream");
-        assert_eq!(Attachment::new("noextension", vec![]).declared_type(), "application/octet-stream");
+        assert_eq!(
+            Attachment::new("a.pdf", vec![]).declared_type(),
+            "application/pdf"
+        );
+        assert_eq!(
+            Attachment::new("a.PNG", vec![]).declared_type(),
+            "image/png"
+        );
+        assert_eq!(
+            Attachment::new("a.wat", vec![]).declared_type(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            Attachment::new("noextension", vec![]).declared_type(),
+            "application/octet-stream"
+        );
         assert_eq!(
             Attachment::with_type("a.bin", "application/pdf", vec![]).declared_type(),
             "application/pdf"
@@ -360,21 +435,36 @@ mod tests {
         assert!(part.contains("Content-Transfer-Encoding: base64\r\n"));
         assert!(part.contains("Content-Disposition: attachment; filename=\"certificate.pdf\"\r\n"));
         // Headers, blank line, then the encoded bytes.
-        let (_, body) = part.split_once("\r\n\r\n").expect("a blank line separates them");
+        let (_, body) = part
+            .split_once("\r\n\r\n")
+            .expect("a blank line separates them");
         assert_eq!(body.trim_end(), base64_wrapped(b"%PDF-1.7 fake"));
     }
 
     #[test]
     fn a_multipart_body_opens_and_closes_its_boundary() {
-        let (content_type, body) = multipart("mixed", &[text_part("plain", "hi"), text_part("html", "<b>hi</b>")]);
+        let (content_type, body) = multipart(
+            "mixed",
+            &[text_part("plain", "hi"), text_part("html", "<b>hi</b>")],
+        );
         assert!(content_type.starts_with("multipart/mixed; boundary=\"=_mb_"));
         let b = content_type
             .split("boundary=\"")
             .nth(1)
             .and_then(|s| s.split('"').next())
             .expect("the boundary is in the header");
-        assert_eq!(body.matches(&format!("--{b}\r\n")).count(), 2, "one opener per part");
-        assert!(body.ends_with(&format!("--{b}--\r\n")), "the closing boundary has trailing dashes");
-        assert!(!body.contains(&format!("\r\n{b}\r\n")), "a boundary line always begins with --");
+        assert_eq!(
+            body.matches(&format!("--{b}\r\n")).count(),
+            2,
+            "one opener per part"
+        );
+        assert!(
+            body.ends_with(&format!("--{b}--\r\n")),
+            "the closing boundary has trailing dashes"
+        );
+        assert!(
+            !body.contains(&format!("\r\n{b}\r\n")),
+            "a boundary line always begins with --"
+        );
     }
 }

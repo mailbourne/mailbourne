@@ -300,7 +300,10 @@ impl std::fmt::Debug for Credentials {
     /// Never prints the password: a debug line ends up in a log, and a log
     /// ends up somewhere you did not choose.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Credentials").field("user", &self.user).field("password", &"…").finish()
+        f.debug_struct("Credentials")
+            .field("user", &self.user)
+            .field("password", &"…")
+            .finish()
     }
 }
 
@@ -378,7 +381,10 @@ where
         Opening::Ready { capabilities } => capabilities,
     };
 
-    if !capabilities.iter().any(|cap| cap.eq_ignore_ascii_case("STARTTLS")) {
+    if !capabilities
+        .iter()
+        .any(|cap| cap.eq_ignore_ascii_case("STARTTLS"))
+    {
         say_goodbye(&mut chat).await;
         return Ok(Outcome::Rejected {
             at: Step::StartTls,
@@ -450,14 +456,15 @@ where
         if let Some(outcome) = refusal(Step::Auth, prompt, Severity::Intermediate) {
             return Ok(Some(outcome));
         }
-        let user = crate::shared::mime::base64_wrapped(credentials.user.as_bytes()).replace("\r\n", "");
+        let user =
+            crate::shared::mime::base64_wrapped(credentials.user.as_bytes()).replace("\r\n", "");
         send_line(chat, &user).await?;
         let prompt = read_reply(chat).await?;
         if let Some(outcome) = refusal(Step::Auth, prompt, Severity::Intermediate) {
             return Ok(Some(outcome));
         }
-        let password =
-            crate::shared::mime::base64_wrapped(credentials.password.as_bytes()).replace("\r\n", "");
+        let password = crate::shared::mime::base64_wrapped(credentials.password.as_bytes())
+            .replace("\r\n", "");
         send_line(chat, &password).await?;
         read_reply(chat).await?
     };
@@ -964,7 +971,10 @@ mod tests {
             client_side,
             |stream| async move { Ok::<_, std::io::Error>(stream) },
             "mail.us.example",
-            &Credentials { user: "alice@us.example".into(), password: password.into() },
+            &Credentials {
+                user: "alice@us.example".into(),
+                password: password.into(),
+            },
             &envelope("alice@us.example", "bob@fake.mx"),
             &crate::shared::core::Message::from_raw(b"x\r\n".to_vec()),
         )
@@ -973,12 +983,17 @@ mod tests {
     }
 
     fn offering(caps: &'static str) -> MxScript {
-        MxScript { ehlo: caps, ..MxScript::default() }
+        MxScript {
+            ehlo: caps,
+            ..MxScript::default()
+        }
     }
 
     #[tokio::test]
     async fn submission_goes_private_then_proves_who_it_is_then_sends() {
-        let script = offering("250-fake.mx greets you\r\n250-STARTTLS\r\n250-AUTH PLAIN LOGIN\r\n250 OK\r\n");
+        let script = offering(
+            "250-fake.mx greets you\r\n250-STARTTLS\r\n250-AUTH PLAIN LOGIN\r\n250 OK\r\n",
+        );
         let (outcome, log) = submit_tls(script, "hunter2").await;
 
         assert!(matches!(outcome.unwrap(), Outcome::Delivered { .. }));
@@ -986,12 +1001,17 @@ mod tests {
         assert_eq!(log.commands[1], "STARTTLS");
         assert_eq!(log.commands[2], "EHLO mail.us.example");
         // AUTH comes after the channel is private, and before the envelope.
-        assert!(log.commands[3].starts_with("AUTH PLAIN "), "{:?}", log.commands[3]);
+        assert!(
+            log.commands[3].starts_with("AUTH PLAIN "),
+            "{:?}",
+            log.commands[3]
+        );
         assert_eq!(log.commands[4], "MAIL FROM:<alice@us.example>");
 
         // RFC 4616: NUL user NUL password, base64'd.
         let encoded = log.commands[3].trim_start_matches("AUTH PLAIN ");
-        let expected = crate::shared::mime::base64_wrapped(b"\0alice@us.example\0hunter2").replace("\r\n", "");
+        let expected =
+            crate::shared::mime::base64_wrapped(b"\0alice@us.example\0hunter2").replace("\r\n", "");
         assert_eq!(encoded, expected);
     }
 
@@ -1010,7 +1030,9 @@ mod tests {
             other => panic!("expected a refusal, got {other:?}"),
         }
         assert!(
-            log.commands.iter().all(|c| !c.to_uppercase().starts_with("AUTH")),
+            log.commands
+                .iter()
+                .all(|c| !c.to_uppercase().starts_with("AUTH")),
             "no AUTH was attempted: {:?}",
             log.commands
         );
@@ -1035,7 +1057,10 @@ mod tests {
             log.commands[4],
             crate::shared::mime::base64_wrapped(b"alice@us.example").replace("\r\n", "")
         );
-        assert!(!log.commands.iter().any(|c| c.contains("hunter2")), "still never in the clear");
+        assert!(
+            !log.commands.iter().any(|c| c.contains("hunter2")),
+            "still never in the clear"
+        );
     }
 
     #[tokio::test]
@@ -1049,20 +1074,33 @@ mod tests {
 
         match outcome.unwrap() {
             Outcome::Rejected { at, reply } => {
-                assert_eq!(at, Step::Auth, "the caller learns it was the password, not the letter");
+                assert_eq!(
+                    at,
+                    Step::Auth,
+                    "the caller learns it was the password, not the letter"
+                );
                 assert_eq!(reply.code, 535);
             }
             other => panic!("expected Rejected at Auth, got {other:?}"),
         }
-        assert!(log.commands.iter().all(|c| !c.starts_with("MAIL")), "the letter was never offered");
+        assert!(
+            log.commands.iter().all(|c| !c.starts_with("MAIL")),
+            "the letter was never offered"
+        );
     }
 
     #[test]
     fn credentials_never_print_their_password() {
-        let c = Credentials { user: "alice@us.example".into(), password: "hunter2".into() };
+        let c = Credentials {
+            user: "alice@us.example".into(),
+            password: "hunter2".into(),
+        };
         let shown = format!("{c:?}");
         assert!(shown.contains("alice@us.example"));
-        assert!(!shown.contains("hunter2"), "a debug line ends up in a log: {shown}");
+        assert!(
+            !shown.contains("hunter2"),
+            "a debug line ends up in a log: {shown}"
+        );
     }
 
     #[tokio::test]
@@ -1078,7 +1116,10 @@ mod tests {
         let outcome = submit(
             client_side,
             "mail.us.example",
-            &Credentials { user: "alice@us.example".into(), password: "hunter2".into() },
+            &Credentials {
+                user: "alice@us.example".into(),
+                password: "hunter2".into(),
+            },
             &envelope("alice@us.example", "bob@fake.mx"),
             &crate::shared::core::Message::from_raw(b"x\r\n".to_vec()),
         )
