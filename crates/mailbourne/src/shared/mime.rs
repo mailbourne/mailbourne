@@ -221,6 +221,12 @@ pub struct Attachment {
     pub content_type: Option<String>,
     /// The bytes.
     pub bytes: Vec<u8>,
+    /// When set, this is not a file to download — it is a picture the HTML
+    /// body draws inline, referenced as `<img src="cid:THIS_VALUE">`. Every
+    /// mail client honours `cid:` for a part travelling in the same
+    /// message; almost none will fetch a remote URL by default, and a
+    /// `data:` URI is stripped outright by the ones that matter most.
+    pub content_id: Option<String>,
 }
 
 impl Attachment {
@@ -230,6 +236,19 @@ impl Attachment {
             filename: filename.into(),
             content_type: None,
             bytes,
+            content_id: None,
+        }
+    }
+
+    /// A picture the HTML body references by `cid:id`, rather than a file to
+    /// download. `id` is your own name for it — short, ASCII, no spaces —
+    /// and the same string the `<img src="cid:…">` in the HTML must use.
+    pub fn inline(filename: impl Into<String>, id: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            filename: filename.into(),
+            content_type: None,
+            bytes,
+            content_id: Some(id.into()),
         }
     }
 
@@ -243,6 +262,7 @@ impl Attachment {
             filename: filename.into(),
             content_type: Some(content_type.into()),
             bytes,
+            content_id: None,
         }
     }
 
@@ -258,11 +278,19 @@ impl Attachment {
         let mut part = String::new();
         let _ = write!(part, "Content-Type: {}\r\n", self.declared_type());
         part.push_str("Content-Transfer-Encoding: base64\r\n");
+        let disposition = if self.content_id.is_some() {
+            "inline"
+        } else {
+            "attachment"
+        };
         let _ = write!(
             part,
-            "Content-Disposition: attachment; {}\r\n",
+            "Content-Disposition: {disposition}; {}\r\n",
             filename_parameter(&self.filename)
         );
+        if let Some(id) = &self.content_id {
+            let _ = write!(part, "Content-ID: <{id}>\r\n");
+        }
         part.push_str("\r\n");
         part.push_str(&base64_wrapped(&self.bytes));
         part.push_str("\r\n");

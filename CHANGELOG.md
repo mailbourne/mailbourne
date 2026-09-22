@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.8 — unreleased
+
+- **`Attachment::inline`** — a picture the HTML body draws with
+  `<img src="cid:…">`, not a file to download. `compose::rich` now builds
+  the extra tier real mail carries this in: `multipart/related` around the
+  text/html alternative, itself inside `multipart/mixed` when a real
+  download travels too. Almost no mail client fetches a remote image by
+  default, and Gmail strips a `data:` URI outright, so `cid:` is the only
+  reliable way to put a logo in an email.
+- With no HTML body, an attachment marked inline has nowhere to be
+  referenced from, so it is sent as an ordinary download instead of being
+  silently dropped.
+
+
 ## 0.0.7 — unreleased
 
 - **`send::conversation::submit`** — submission over a stream that is

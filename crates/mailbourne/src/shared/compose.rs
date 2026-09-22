@@ -91,6 +91,15 @@ pub fn rich(
     attachments: &[Attachment],
     id_host: &str,
 ) -> Message {
+    // A `cid:` reference only means something inside an HTML body; with
+    // none, an attachment marked inline is still a file worth keeping, so
+    // it travels as an ordinary download rather than vanishing.
+    let (inline, regular): (Vec<&Attachment>, Vec<&Attachment>) = if html.is_some() {
+        attachments.iter().partition(|a| a.content_id.is_some())
+    } else {
+        (Vec::new(), attachments.iter().collect())
+    };
+
     if html.is_none() && attachments.is_empty() {
         return plain_text(from, to, subject, text, id_host);
     }
@@ -112,30 +121,51 @@ pub fn rich(
             mime::quoted_printable(text),
         ),
     };
+    let plain_body = html.is_none();
 
-    let (content_type, body) = if attachments.is_empty() {
-        (body_type, body)
-    } else {
-        // The letter becomes the first part, the files follow it.
+    // A picture the HTML references by `cid:` travels *with* that
+    // rendering, in a multipart/related — not as a download alongside it,
+    // which is what multipart/mixed would say. Only after that tier is
+    // settled do the real, downloadable attachments wrap the whole thing.
+    let wrap = |content_type: String, body: String, transfer_encoded: bool| -> String {
         let mut first = String::new();
-        first.push_str(&format!("Content-Type: {body_type}\r\n"));
-        if html.is_none() {
+        first.push_str(&format!("Content-Type: {content_type}\r\n"));
+        if transfer_encoded {
             first.push_str("Content-Transfer-Encoding: quoted-printable\r\n");
         }
         first.push_str("\r\n");
         first.push_str(&body);
         first.push_str("\r\n");
+        first
+    };
 
+    let (body_type, body) = if inline.is_empty() {
+        (body_type, body)
+    } else {
+        let first = wrap(body_type, body, plain_body);
         let mut parts = vec![first];
-        parts.extend(attachments.iter().map(|a| a.to_part()));
+        parts.extend(inline.iter().map(|a| a.to_part()));
+        mime::multipart("related", &parts)
+    };
+    // Once wrapped, the transfer encoding is declared on the part inside
+    // the wrapper, not on the wrapper itself.
+    let plain_body = plain_body && inline.is_empty();
+
+    let (content_type, body) = if regular.is_empty() {
+        (body_type, body)
+    } else {
+        let first = wrap(body_type, body, plain_body);
+        let mut parts = vec![first];
+        parts.extend(regular.iter().map(|a| a.to_part()));
         mime::multipart("mixed", &parts)
     };
+    let plain_body = plain_body && regular.is_empty();
 
     let mut raw = headers(from, to, subject, id_host);
     raw.push_str(&format!("Content-Type: {content_type}\r\n"));
     // A single text body still needs its encoding declared; a multipart one
     // declares the encoding on each of its parts instead.
-    if html.is_none() && attachments.is_empty() {
+    if plain_body {
         raw.push_str("Content-Transfer-Encoding: quoted-printable\r\n");
     }
     raw.push_str("\r\n");
@@ -319,6 +349,69 @@ mod tests {
             "an encoded word, not raw bytes"
         );
         assert!(!text.contains("Sertifikat — peserta"));
+    }
+
+    #[test]
+    fn an_inline_picture_is_related_to_the_html_not_mixed_alongside_it() {
+        let logo = Attachment::inline("logo.svg", "logo", b"<svg/>".to_vec());
+        let text = build(
+            "plain words",
+            Some("<img src=\"cid:logo\"> rich words"),
+            &[logo],
+        );
+        let header = text
+            .lines()
+            .find(|l| l.starts_with("Content-Type:"))
+            .unwrap();
+        assert!(header.contains("multipart/related"), "{header}");
+
+        // Inside it: the two renderings, alternative, then the picture.
+        let inner = text
+            .lines()
+            .find(|l| l.contains("multipart/alternative"))
+            .expect("still two renderings");
+        assert_ne!(
+            boundary_of(header),
+            boundary_of(inner),
+            "related and alternative are different tiers"
+        );
+        assert!(text.contains("Content-ID: <logo>\r\n"));
+        assert!(text.contains("Content-Disposition: inline; filename=\"logo.svg\"\r\n"));
+        assert!(text.contains("cid:logo"), "the html still names it");
+    }
+
+    #[test]
+    fn an_inline_picture_and_a_real_attachment_nest_related_inside_mixed() {
+        let logo = Attachment::inline("logo.svg", "logo", b"<svg/>".to_vec());
+        let pdf = Attachment::new("certificate.pdf", b"bytes".to_vec());
+        let text = build("plain words", Some("<img src=\"cid:logo\">"), &[logo, pdf]);
+
+        let outer = text
+            .lines()
+            .find(|l| l.starts_with("Content-Type:"))
+            .unwrap();
+        assert!(outer.contains("multipart/mixed"), "{outer}");
+        let related = text
+            .lines()
+            .find(|l| l.contains("multipart/related"))
+            .expect("the related tier exists");
+        assert_ne!(boundary_of(outer), boundary_of(related));
+
+        // The downloadable file is outside `related`, at the `mixed` level —
+        // a client that ignores `related` should still offer it as a file.
+        assert!(text.contains("Content-Disposition: attachment; filename=\"certificate.pdf\"\r\n"));
+        assert!(text.contains("Content-Disposition: inline; filename=\"logo.svg\"\r\n"));
+    }
+
+    #[test]
+    fn with_no_html_an_inline_labelled_picture_is_still_a_real_attachment() {
+        // Nothing can reference cid: without an HTML body to write it in, so
+        // this must not silently vanish — it becomes an ordinary download.
+        let logo = Attachment::inline("logo.svg", "logo", b"<svg/>".to_vec());
+        let text = build("plain words only", None, &[logo]);
+        assert!(!text.contains("multipart/related"), "{text}");
+        assert!(text.contains("multipart/mixed"));
+        assert!(text.contains("Content-Disposition: inline; filename=\"logo.svg\"\r\n"));
     }
 
     #[test]
